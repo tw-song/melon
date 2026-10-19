@@ -23,27 +23,57 @@ if [[ -z "$ROOT" ]]; then
 fi
 
 PORT=5173
-URL="http://127.0.0.1:${PORT}/index/"
+URL="http://127.0.0.1:${PORT}/index/index.html"
+SERVER_PID=""
+
 is_melon() {
   curl -fsS --max-time 1 "$URL" | grep -q '<title>Melon</title>'
 }
-if ! is_melon; then
-  if ! command -v python3 >/dev/null 2>&1; then
-    osascript -e 'display alert "Melon" message "Python 3 is needed to open Melon."'
-    exit 1
-  fi
-  python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$ROOT" >>/tmp/melon-server.log 2>&1 &
-  ready=0
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    if is_melon; then
-      ready=1
-      break
+
+stop_port() {
+  local pid
+  while read -r pid; do
+    [[ -z "$pid" ]] && continue
+    if ps -p "$pid" -o command= 2>/dev/null | grep -q 'http.server'; then
+      kill "$pid" 2>/dev/null || true
     fi
-    sleep 0.15
-  done
-  if [[ "$ready" -ne 1 ]]; then
-    osascript -e 'display alert "Melon" message "Melon could not start. See /tmp/melon-server.log."'
-    exit 1
+  done < <(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null || true)
+}
+
+cleanup() {
+  trap - EXIT INT TERM
+  if [[ -n "$SERVER_PID" ]]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
   fi
+  stop_port
+}
+trap cleanup EXIT INT TERM
+
+if ! command -v python3 >/dev/null 2>&1; then
+  osascript -e 'display alert "Melon" message "Python 3 is needed to open Melon."'
+  exit 1
 fi
+
+stop_port
+python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$ROOT" >>/tmp/melon-server.log 2>&1 &
+SERVER_PID=$!
+
+ready=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if is_melon; then
+    ready=1
+    break
+  fi
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.15
+done
+if [[ "$ready" -ne 1 ]]; then
+  osascript -e 'display alert "Melon" message "Melon could not start. See /tmp/melon-server.log."'
+  exit 1
+fi
+
 open "$URL"
+wait "$SERVER_PID"
