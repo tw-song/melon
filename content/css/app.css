@@ -99,6 +99,22 @@ button:focus-visible,
   min-width: 0;
 }
 
+html.melon-app .title-left {
+  padding-left: 68px;
+}
+
+html.melon-app,
+html.melon-app * {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html.melon-app input,
+html.melon-app textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 .brand-wrap { position: relative; margin: 0 4px 0 2px; }
 
 .brand {

@@ -771,7 +771,16 @@ function snapshotOutcome(snap) {
   return getCalculator(snap.calcId).compute(snapshotValues(snap))
 }
 
+function nativeHandlers() {
+  return window.webkit?.messageHandlers
+}
+
 function printReport(html, title) {
+  const print = nativeHandlers()?.melonPrint
+  if (print) {
+    print.postMessage({ html, title })
+    return
+  }
   const frame = document.createElement('iframe')
   frame.title = title
   frame.setAttribute('aria-hidden', 'true')
@@ -792,6 +801,17 @@ function printReport(html, title) {
 }
 
 function downloadBytes(bytes, filename) {
+  const save = nativeHandlers()?.melonSave
+  if (save) {
+    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+    let binary = ''
+    const chunk = 0x8000
+    for (let i = 0; i < data.length; i += chunk) {
+      binary += String.fromCharCode(...data.subarray(i, i + chunk))
+    }
+    save.postMessage({ filename, base64: btoa(binary) })
+    return
+  }
   const blob = new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
@@ -1484,7 +1504,17 @@ async function loadExchangeRates({ force = false } = {}) {
   return exchangeRequest
 }
 
+function preventAccidentalSelection() {
+  if (!document.documentElement.classList.contains('melon-app')) return
+  document.addEventListener('selectstart', (event) => {
+    const target = event.target
+    if (target instanceof Element && target.closest('input, textarea')) return
+    event.preventDefault()
+  })
+}
+
 function boot() {
+  preventAccidentalSelection()
   load()
   const hash = location.hash.replace(/^#/, '')
   if (isCalcId(hash)) state.activeId = hash

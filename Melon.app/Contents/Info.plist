@@ -22,9 +22,5 @@
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
-  <key>NSDocumentsFolderUsageDescription</key>
-  <string>Melon reads its calculator files from the Documents folder.</string>
-  <key>NSDesktopFolderUsageDescription</key>
-  <string>Melon reads its calculator files from the Desktop folder.</string>
 </dict>
 </plist>
