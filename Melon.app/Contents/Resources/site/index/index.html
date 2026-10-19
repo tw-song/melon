@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#141414" />
+    <meta name="description" content="Melon calculators for growth, loans, and planning." />
+    <title>Melon</title>
+    <link rel="icon" href="../icons/melon.svg" type="image/svg+xml" />
+    <link rel="icon" href="../icons/favicon.ico" sizes="32x32" />
+    <link rel="stylesheet" href="../css/app.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <header class="titlebar">
+        <div class="title-left">
+          <button type="button" class="icon-btn" data-action="toggle-sidebar" aria-pressed="true" aria-label="Toggle sidebar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M9 5v14"/></svg>
+          </button>
+          <div class="brand-wrap">
+            <button type="button" class="brand" id="brand-button" data-action="toggle-brand" aria-expanded="false" aria-controls="brand-menu" aria-haspopup="true">
+              <img class="mark" src="../icons/melon.svg" width="16" height="16" alt="" />
+              <span>Melon</span>
+            </button>
+            <div class="brand-menu" id="brand-menu" hidden role="menu" aria-label="Melon">
+              <p>Created on March 26, 2026.</p>
+              <p>Published on October 18, 2026.</p>
+              <p>Updated on October 18, 2026.</p>
+            </div>
+          </div>
+          <button type="button" class="icon-btn" data-action="toggle-panel" aria-pressed="true" aria-label="Toggle schedule">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 14h16"/></svg>
+          </button>
+          <button type="button" class="icon-btn" data-action="toggle-results" aria-pressed="true" aria-label="Toggle result">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M14 5v14"/></svg>
+          </button>
+        </div>
+        <div class="crumb" id="crumb"></div>
+        <div class="title-right">
+          <a class="about-link" href="https://tw-song.github.io/biography/#home" target="_blank" rel="noopener noreferrer">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path fill="#b08a4a" d="M1.6 3.4h4.15l1.2 1.45H14.4c.45 0 .8.35.8.8v.55H1.6z"/>
+              <path fill="#d2a85c" stroke="rgba(70,45,18,0.28)" stroke-width="0.65" d="M1.6 5.85h12.8c.5 0 .9.4.9.9v6.1c0 .5-.4.9-.9.9H1.6c-.5 0-.9-.4-.9-.9v-6.1c0-.5.4-.9.9-.9z"/>
+              <path fill="rgba(255,255,255,0.18)" d="M1.85 6.15h12.3c.28 0 .5.16.5.36v.7H1.35v-.7c0-.2.22-.36.5-.36z"/>
+            </svg>
+            <span>About Me</span>
+          </a>
+          <button type="button" class="search-btn" data-action="open-palette">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="5.5"/><path d="M15.5 15.5 20 20"/></svg>
+            <span class="search-label">Search</span>
+            <kbd id="search-kbd">⌘K</kbd>
+          </button>
+        </div>
+      </header>
+      <div class="body">
+        <nav class="activity" id="activity" aria-label="Views"></nav>
+        <aside class="sidebar" id="sidebar" aria-label="Calculators"></aside>
+        <div class="workspace">
+          <div class="editor-row">
+            <main class="editor" id="editor">
+              <header class="editor-header" id="editor-header"></header>
+              <div class="editor-body" id="editor-body"></div>
+            </main>
+            <aside class="results" id="results" aria-label="Result"></aside>
+          </div>
+          <section class="panel" id="panel" aria-label="Schedule">
+            <div class="resize" id="panel-resize" title="Drag to resize. Double-click to reset."></div>
+            <div id="panel-inner"></div>
+          </section>
+        </div>
+      </div>
+      <footer class="statusbar" id="statusbar"></footer>
+    </div>
+    <div id="palette" hidden>
+      <div class="palette-backdrop" data-action="close-palette"></div>
+      <div class="palette" role="dialog" aria-modal="true" aria-label="Search">
+        <input id="palette-input" class="palette-input" placeholder="Search calculators and actions" spellcheck="false" autocomplete="off" aria-label="Search calculators and actions" />
+        <div id="palette-list" class="palette-list" role="listbox"></div>
+        <div class="palette-foot">↑↓ navigate · Enter open · Esc close</div>
+      </div>
+    </div>
+    <div id="live" class="sr-only" aria-live="polite"></div>
+    <noscript><p class="noscript">Melon needs JavaScript to calculate.</p></noscript>
+    <script type="module" src="../js/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "name": "melon",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test js/calculators.test.js js/report.test.js js/workbook.test.js",
+    "start": "python3 -m http.server 5173 --bind 127.0.0.1"
+  }
+}

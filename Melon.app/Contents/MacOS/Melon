@@ -3,6 +3,11 @@ EMBEDDED_ROOT="/Users/twsong/Documents/GitHub/melon"
 MACOS_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUNDLE="$(cd "$MACOS_DIR/../.." && pwd)"
 PARENT="$(cd "$BUNDLE/.." && pwd)"
+LOG="/tmp/melon-server.log"
+PORT=5173
+URL="http://127.0.0.1:${PORT}/index/index.html"
+SERVER_PID=""
+PY="/usr/bin/python3"
 
 site_root() {
   local base="$1"
@@ -13,28 +18,34 @@ site_root() {
   fi
 }
 
+log() {
+  printf '%s\n' "$*" >>"$LOG"
+}
+
 ROOT="$(site_root "$PARENT")"
 if [[ -z "$ROOT" ]]; then
   ROOT="$(site_root "$EMBEDDED_ROOT")"
 fi
-if [[ -z "$ROOT" ]]; then
+BUNDLED="$(cd "$MACOS_DIR/../Resources/site" 2>/dev/null && pwd || true)"
+if [[ -z "$ROOT" && -z "$BUNDLED" ]]; then
   osascript -e 'display alert "Melon" message "The Melon files could not be found next to this shortcut."'
   exit 1
 fi
 
-PORT=5173
-URL="http://127.0.0.1:${PORT}/index/index.html"
-SERVER_PID=""
-
-is_melon() {
-  curl -fsS --max-time 1 "$URL" | grep -q '<title>Melon</title>'
-}
+if [[ ! -x "$PY" ]]; then
+  PY="$(command -v python3 || true)"
+fi
+if [[ -z "$PY" ]]; then
+  osascript -e 'display alert "Melon" message "Python 3 is needed to open Melon."'
+  exit 1
+fi
 
 stop_port() {
-  local pid
+  local pid command
   while read -r pid; do
     [[ -z "$pid" ]] && continue
-    if ps -p "$pid" -o command= 2>/dev/null | grep -q 'http.server'; then
+    command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command" == *[Pp]ython* || "$command" == *http.server* ]]; then
       kill "$pid" 2>/dev/null || true
     fi
   done < <(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null || true)
@@ -50,26 +61,48 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if ! command -v python3 >/dev/null 2>&1; then
-  osascript -e 'display alert "Melon" message "Python 3 is needed to open Melon."'
+log "---- $(date) ----"
+log "root $ROOT"
+log "python $PY"
+
+can_read() {
+  "$PY" -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); data=p.read_bytes();
+raise SystemExit(0 if b"<title>Melon</title>" in data else 1)' "$1" >>"$LOG" 2>&1
+}
+
+if [[ -n "$ROOT" ]] && can_read "$ROOT/index/index.html"; then
+  log "serving $ROOT"
+elif [[ -n "$BUNDLED" ]] && can_read "$BUNDLED/index/index.html"; then
+  ROOT="$BUNDLED"
+  log "serving bundled $ROOT"
+else
+  osascript -e 'display alert "Melon" message "Melon could not read its files. See /tmp/melon-server.log."'
   exit 1
 fi
 
 stop_port
-python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$ROOT" >>/tmp/melon-server.log 2>&1 &
+(
+  cd "$ROOT" || exit 1
+  exec "$PY" -m http.server "$PORT" --bind 127.0.0.1
+) >>"$LOG" 2>&1 &
 SERVER_PID=$!
 
 ready=0
 for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  if is_melon; then
+  body="$(mktemp /tmp/melon-check.XXXXXX)"
+  code="$(curl -sS -o "$body" -w '%{http_code}' --max-time 1 "$URL" 2>>"$LOG" || true)"
+  if [[ "$code" == "200" ]] && grep -q '<title>Melon</title>' "$body"; then
     ready=1
+    rm -f "$body"
     break
   fi
+  rm -f "$body"
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     break
   fi
   sleep 0.15
 done
+
 if [[ "$ready" -ne 1 ]]; then
   osascript -e 'display alert "Melon" message "Melon could not start. See /tmp/melon-server.log."'
   exit 1
