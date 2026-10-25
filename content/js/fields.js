@@ -38,6 +38,7 @@ export function spanText(field, values) {
 }
 
 export function lineIsBlank(field, row) {
+  if (row.service && row.service !== 'custom') return false
   const writable = field.columns.filter((column) => column.type !== 'select')
   if (!writable.length) return false
   return writable.every((column) => !String(row[column.key] ?? '').trim())

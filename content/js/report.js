@@ -1,10 +1,10 @@
 import { renderChart } from './chart.js'
-import { visibleFields, parseLines, parseSaleItems } from './calculators.js'
+import { fieldsForReport, parseLines, parseSaleItems } from './calculators.js'
 import { displayRaw, formatNumber, lineIsBlank, optionLabel, spanText } from './fields.js'
 import { escapeHtml } from './html.js'
 
 function fieldText(field, values) {
-  if (field.kind === 'number') return formatNumber(field, displayRaw(field, values))
+  if (field.kind === 'number' || field.kind === 'slider') return formatNumber(field, displayRaw(field, values))
   if (field.kind === 'segment' || field.kind === 'select' || field.kind === 'combo') return optionLabel(field, values[field.key], '—')
   if (field.kind === 'keypad') {
     const text = String(values[field.key] || '').trim()
@@ -23,10 +23,11 @@ function dataTable(columns, rows) {
   return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`
 }
 
-function lineCell(column, row) {
+function lineCell(column, row, values) {
+  const shown = typeof column.value === 'function' ? column.value(row, values) : row[column.key]
   if (column.type === 'select') return optionLabel(column, row[column.key], '—')
-  if (column.type === 'number') return formatNumber(column, row[column.key])
-  return String(row[column.key] ?? '').trim() || '—'
+  if (column.type === 'number') return formatNumber(column, shown)
+  return String(shown ?? '').trim() || '—'
 }
 
 function linesBlock(field, values) {
@@ -39,7 +40,7 @@ function linesBlock(field, values) {
   }))
   const body = rows.map((row) => {
     const next = {}
-    for (const column of field.columns) next[column.key] = lineCell(column, row)
+    for (const column of field.columns) next[column.key] = lineCell(column, row, values)
     return next
   })
   return dataTable(columns, body)
@@ -61,13 +62,15 @@ function itemsBlock(field, values) {
   )
 }
 
-function inputsMarkup(calc, values) {
-  const blocks = visibleFields(calc, values).map((field) => {
+function inputsMarkup(calc, values, enteredOnly) {
+  const fields = fieldsForReport(calc, values, enteredOnly)
+  if (!fields.length) return '<p class="empty">No entered inputs.</p>'
+  const blocks = fields.map((field) => {
     if (field.kind === 'lines') return `<h4>${escapeHtml(field.label)}</h4>${linesBlock(field, values)}`
     if (field.kind === 'items') return `<h4>${escapeHtml(field.label)}</h4>${itemsBlock(field, values)}`
     return ''
   }).join('')
-  const rows = visibleFields(calc, values)
+  const rows = fields
     .filter((field) => field.kind !== 'lines' && field.kind !== 'items')
     .map((field) => `<tr><th>${escapeHtml(field.label)}</th><td>${escapeHtml(fieldText(field, values))}</td></tr>`)
     .join('')
@@ -75,28 +78,44 @@ function inputsMarkup(calc, values) {
   return `${table}${blocks}`
 }
 
-function resultMarkup(outcome) {
+function reportOptions(options = {}) {
+  return {
+    inputs: options.inputs !== false,
+    result: options.result !== false,
+    schedule: options.schedule !== false,
+    formula: options.formula !== false,
+    enteredOnly: options.enteredOnly === true,
+  }
+}
+
+function resultMarkup(outcome, options) {
   if (!outcome?.ok) {
-    return `<p class="error">${escapeHtml(outcome?.formError || 'This calculation could not be completed.')}</p>`
+    return options.result
+      ? `<p class="error">${escapeHtml(outcome?.formError || 'This calculation could not be completed.')}</p>`
+      : ''
   }
   const { headline, stats, chart, schedule, formula } = outcome.result
-  const statRows = (stats || []).map((stat) => `<tr><th>${escapeHtml(stat.label)}</th><td>${escapeHtml(stat.value)}</td></tr>`).join('')
-  const chartMarkup = chart ? renderChart(chart, { print: true }) : ''
-  const scheduleMarkup = schedule?.rows?.length ? dataTable(schedule.columns, schedule.rows) : '<p class="empty">No schedule.</p>'
-  const formulaMarkup = Array.isArray(formula) && formula.length
-    ? `<h3>Formula</h3><pre>${escapeHtml(formula.join('\n'))}</pre>`
-    : ''
-  return `
-    <p class="result-label">${escapeHtml(headline.label)}</p>
-    <p class="headline">${escapeHtml(headline.value)}</p>
-    ${headline.detail ? `<p class="detail">${escapeHtml(headline.detail)}</p>` : ''}
-    ${headline.warning ? `<p class="error">${escapeHtml(headline.warning)}</p>` : ''}
-    ${statRows ? `<h3>Outputs</h3><table class="fields"><tbody>${statRows}</tbody></table>` : ''}
-    ${chartMarkup}
-    <h3>Schedule</h3>
-    ${scheduleMarkup}
-    ${formulaMarkup}
-  `
+  const parts = []
+  if (options.result) {
+    const statRows = (stats || []).map((stat) => `<tr><th>${escapeHtml(stat.label)}</th><td>${escapeHtml(stat.value)}</td></tr>`).join('')
+    const chartMarkup = chart ? renderChart(chart, { print: true }) : ''
+    parts.push(`
+      <p class="result-label">${escapeHtml(headline.label)}</p>
+      <p class="headline">${escapeHtml(headline.value)}</p>
+      ${headline.detail ? `<p class="detail">${escapeHtml(headline.detail)}</p>` : ''}
+      ${headline.warning ? `<p class="error">${escapeHtml(headline.warning)}</p>` : ''}
+      ${statRows ? `<h3>Outputs</h3><table class="fields"><tbody>${statRows}</tbody></table>` : ''}
+      ${chartMarkup}
+    `)
+  }
+  if (options.schedule) {
+    const scheduleMarkup = schedule?.rows?.length ? dataTable(schedule.columns, schedule.rows) : '<p class="empty">No schedule.</p>'
+    parts.push(`<h3>Schedule</h3>${scheduleMarkup}`)
+  }
+  if (options.formula && Array.isArray(formula) && formula.length) {
+    parts.push(`<h3>Formula</h3><pre>${escapeHtml(formula.join('\n'))}</pre>`)
+  }
+  return parts.join('')
 }
 
 function savedWhen(savedAt) {
@@ -109,18 +128,20 @@ function savedWhen(savedAt) {
   })
 }
 
-export function reportDocument(entries, title) {
-  const sheets = entries.map((entry) => `
+export function reportDocument(entries, title, options) {
+  const chosen = reportOptions(options)
+  const sheets = entries.map((entry) => {
+    const result = resultMarkup(entry.outcome, chosen)
+    return `
     <article class="sheet">
       <p class="eyebrow">${escapeHtml(entry.calc.group)}</p>
       <h2>${escapeHtml(entry.calc.name)}</h2>
       <p class="when">Saved ${escapeHtml(savedWhen(entry.savedAt))}</p>
-      <h3>Inputs</h3>
-      ${inputsMarkup(entry.calc, entry.values)}
-      <h3>Result</h3>
-      ${resultMarkup(entry.outcome)}
+      ${chosen.inputs ? `<h3>Inputs</h3>${inputsMarkup(entry.calc, entry.values, chosen.enteredOnly)}` : ''}
+      ${result ? `<h3>Result</h3>${result}` : ''}
     </article>
-  `).join('')
+  `
+  }).join('')
   return `<!DOCTYPE html>
 <html lang="en">
 <head>

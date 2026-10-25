@@ -24,4 +24,15 @@ test('an excel workbook stores inputs, the result, and outputs', () => {
   assert.match(text, /sheet name="Mortgage"/)
   assert.match(text, /sheet name="Loan"/)
   assert.match(text, /xl\/worksheets\/sheet2.xml/)
+
+  const entered = sheetsForEntries([
+    { calc, values: { ...values, price: '500000' }, savedAt: Date.UTC(2026, 9, 18, 22, 0), outcome },
+  ], { enteredOnly: true, schedule: false, formula: false })
+  const enteredText = new TextDecoder().decode(workbookFile(entered))
+  const inputs = enteredText.split('Result')[0]
+  assert.match(inputs, /Home price/)
+  assert.match(inputs, />500000</)
+  assert.equal(inputs.includes('Down payment'), false)
+  assert.equal(enteredText.includes('>Schedule<'), false)
+  assert.equal(enteredText.includes('>Formula<'), false)
 })

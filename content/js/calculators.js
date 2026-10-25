@@ -23,6 +23,7 @@ function termField(key, label, keys, extra = {}) {
     key,
     label,
     kind: 'span',
+    required: true,
     hint: TERM_HINT,
     parts: [
       { key: years, label: 'Years', max: 100 },
@@ -385,6 +386,9 @@ const taxDefaults = {
   dental: '0',
   hsa: '0',
   other: '0',
+  stubEntry: 'amount',
+  stubPeriod: 'annual',
+  stubGross: '0',
   social: '0',
   medicare: '0',
   federal: '0',
@@ -396,11 +400,25 @@ const taxDefaults = {
   dentalAmount: '0',
   hsaAmount: '0',
   otherAmount: '0',
+  socialRate: '0',
+  medicareRate: '0',
+  federalRate: '0',
+  stateRate: '0',
+  payrollRate: '0',
+  retirementRate: '0',
+  healthRate: '0',
+  visionRate: '0',
+  dentalRate: '0',
+  hsaRate: '0',
+  otherRate: '0',
 }
 
-function taxFields({ includeState, customHint }) {
+const STUB_PERIODS = { weekly: 52, biweekly: 26, semimonthly: 24, monthly: 12, annual: 1 }
+
+function taxFields({ includeState }) {
   const estimate = (values) => values.taxes !== 'custom'
-  const custom = (values) => values.taxes === 'custom'
+  const amountMode = (values) => values.taxes === 'custom' && values.stubEntry !== 'percent'
+  const percentMode = (values) => values.taxes === 'custom' && values.stubEntry === 'percent'
   const moneyItem = (key, label) => ({
     key,
     label,
@@ -408,8 +426,18 @@ function taxFields({ includeState, customHint }) {
     prefix: '$',
     min: 0,
     ...amountMax,
-    showIf: custom,
-    hint: customHint,
+    showIf: amountMode,
+    hint: 'Dollar line from the paystub. It is turned into a percent of gross.',
+  })
+  const rateItem = (key, label) => ({
+    key,
+    label,
+    kind: 'number',
+    suffix: '%',
+    min: 0,
+    max: 100,
+    showIf: percentMode,
+    hint: 'Percent of gross. It is turned into a dollar amount of this pay.',
   })
   return [
     {
@@ -420,7 +448,42 @@ function taxFields({ includeState, customHint }) {
         { value: 'estimate', label: 'State default' },
         { value: 'custom', label: 'Fill in' },
       ],
-      hint: 'State default uses 2026 Social Security, Medicare, federal income tax, and that state’s income tax. Fill in uses the amounts you enter.',
+      hint: 'State default uses 2026 Social Security, Medicare, federal income tax, and that state’s income tax. Fill in uses a paystub, in dollars or percents.',
+    },
+    {
+      key: 'stubEntry',
+      label: 'Enter as',
+      kind: 'segment',
+      showIf: (values) => values.taxes === 'custom',
+      options: [
+        { value: 'amount', label: 'Dollars' },
+        { value: 'percent', label: 'Percent' },
+      ],
+      hint: 'Dollars from the paystub become a percent of gross. A percent becomes the dollar amount of this pay.',
+    },
+    {
+      key: 'stubPeriod',
+      label: 'Paystub period',
+      kind: 'segment',
+      showIf: amountMode,
+      options: [
+        { value: 'weekly', label: 'Weekly' },
+        { value: 'biweekly', label: 'Biweekly' },
+        { value: 'semimonthly', label: 'Semimonthly' },
+        { value: 'monthly', label: 'Monthly' },
+        { value: 'annual', label: 'Annual' },
+      ],
+      hint: 'How often the paystub is paid. Used when paystub gross is 0. Wage scales the dollars to a year. Overtime scales them to this week.',
+    },
+    {
+      key: 'stubGross',
+      label: 'Paystub gross',
+      kind: 'number',
+      prefix: '$',
+      min: 0,
+      ...amountMax,
+      showIf: amountMode,
+      hint: 'Gross printed on that paystub. Each line is divided by this, then that percent is applied to the pay above. Leave 0 to scale the dollars by the pay period instead.',
     },
     ...(includeState
       ? [{
@@ -481,6 +544,17 @@ function taxFields({ includeState, customHint }) {
     moneyItem('dentalAmount', 'Dental'),
     moneyItem('hsaAmount', 'HSA'),
     moneyItem('otherAmount', 'Other'),
+    rateItem('socialRate', 'Social Security'),
+    rateItem('medicareRate', 'Medicare'),
+    rateItem('federalRate', 'Federal income tax'),
+    rateItem('stateRate', 'State income tax'),
+    rateItem('payrollRate', 'State payroll tax'),
+    rateItem('retirementRate', '401(k)'),
+    rateItem('healthRate', 'Health insurance'),
+    rateItem('visionRate', 'Vision'),
+    rateItem('dentalRate', 'Dental'),
+    rateItem('hsaRate', 'HSA'),
+    rateItem('otherRate', 'Other'),
   ]
 }
 
@@ -993,8 +1067,11 @@ export const calculators = [
     name: 'Mortgage',
     group: 'Borrowing',
     icon: 'home',
-    description: 'Housing payment including principal, interest, taxes, insurance, and HOA.',
+    description: 'Housing payment for a standard or VA loan, including principal, interest, taxes, insurance, and HOA.',
     defaults: {
+      loanType: 'conventional',
+      vaUse: 'first',
+      vaFeeMode: 'rolled',
       price: '450000',
       down: '90000',
       annualRate: '6.5',
@@ -1033,10 +1110,69 @@ export const calculators = [
           extra: '0',
         },
       },
+      {
+        name: 'VA loan',
+        values: {
+          loanType: 'va',
+          vaUse: 'first',
+          vaFeeMode: 'rolled',
+          price: '450000',
+          down: '0',
+          annualRate: '6.5',
+          years: '30',
+          tax: '5400',
+          insurance: '1800',
+          hoa: '0',
+          extra: '0',
+        },
+      },
     ],
     fields: [
+      {
+        key: 'loanType',
+        label: 'Loan',
+        kind: 'segment',
+        options: [
+          { value: 'conventional', label: 'Standard' },
+          { value: 'va', label: 'VA' },
+        ],
+        hint: 'VA loans are for eligible Veterans, service members, and some surviving spouses. They allow $0 down and charge no monthly mortgage insurance.',
+      },
+      {
+        key: 'vaUse',
+        label: 'VA funding fee',
+        kind: 'segment',
+        showIf: (values) => values.loanType === 'va',
+        options: [
+          { value: 'first', label: 'First use' },
+          { value: 'subsequent', label: 'Used before' },
+          { value: 'exempt', label: 'Exempt' },
+        ],
+        hint: 'Purchase funding fee since April 7, 2023. Under 5% down is 2.15% the first time and 3.3% after that. At least 5% down is 1.5%, and at least 10% down is 1.25%. Exempt is $0, including VA disability compensation and an active-duty Purple Heart.',
+      },
+      {
+        key: 'vaFeeMode',
+        label: 'Pay funding fee',
+        kind: 'segment',
+        showIf: (values) => values.loanType === 'va' && values.vaUse !== 'exempt',
+        options: [
+          { value: 'rolled', label: 'Roll in' },
+          { value: 'upfront', label: 'At closing' },
+        ],
+        hint: 'Roll in adds the fee to the loan. At closing pays it with the down payment. The percent applies to the loan before the fee is added.',
+      },
       { key: 'price', label: 'Home price', kind: 'number', prefix: '$', min: 0, ...amountMax, required: true },
-      { key: 'down', label: 'Down payment', kind: 'number', prefix: '$', min: 0, ...amountMax },
+      {
+        key: 'down',
+        label: 'Down payment',
+        kind: 'number',
+        prefix: '$',
+        min: 0,
+        ...amountMax,
+        hint: (values) => values.loanType === 'va'
+          ? 'VA loans allow $0 down. 5% down lowers the funding fee to 1.5%, and 10% down lowers it to 1.25%.'
+          : '',
+      },
       { key: 'annualRate', label: 'Annual rate', kind: 'number', suffix: '%', min: 0, max: 100, hint: 'APR, compounded monthly.' },
       termField('term', 'Term', ['years', 'months', 'days']),
       { key: 'tax', label: 'Property tax / year', kind: 'number', prefix: '$', min: 0, ...amountMax },
@@ -1200,6 +1336,164 @@ export const calculators = [
       { key: 'deposit', label: 'Security deposit', kind: 'number', prefix: '$', min: 0, ...amountMax, hint: 'Collected up front. It is not part of the monthly payment.' },
     ],
     compute: computeRent,
+  },
+  {
+    id: 'apr',
+    name: 'APR',
+    group: 'Credit',
+    icon: 'score',
+    description: 'Estimate an APR and the chance of approval from payment history, credit length, and debt for a mortgage, car, or personal loan. No Social Security number.',
+    defaults: {
+      source: 'score',
+      score: '720',
+      payments: 'ontime',
+      utilization: 'under30',
+      age: '5to9',
+      inquiries: 'few',
+      mix: 'cards',
+      product: 'mortgage30',
+      amount: '350000',
+      debt: '0',
+      income: '0',
+    },
+    examples: [
+      { name: '720 mortgage', values: { source: 'score', score: '720', product: 'mortgage30', amount: '350000' } },
+      { name: 'New car at 800', values: { source: 'score', score: '800', product: 'autonew', amount: '35000' } },
+      {
+        name: 'From payment history',
+        values: {
+          source: 'history',
+          payments: 'ontime',
+          utilization: 'under10',
+          age: '10plus',
+          inquiries: 'none',
+          mix: 'both',
+          product: 'personal36',
+          amount: '10000',
+        },
+      },
+    ],
+    fields: [
+      {
+        key: 'source',
+        label: 'Credit',
+        kind: 'segment',
+        options: [
+          { value: 'score', label: 'I have a score' },
+          { value: 'history', label: 'From my history' },
+        ],
+        hint: 'Nothing here asks for a Social Security number or checks a credit report.',
+      },
+      {
+        key: 'score',
+        label: 'Credit score',
+        kind: 'number',
+        min: 300,
+        max: 850,
+        required: true,
+        showIf: (values) => values.source !== 'history',
+        hint: 'A score you already have, from 300 to 850.',
+      },
+      {
+        key: 'payments',
+        label: 'Payment history',
+        kind: 'select',
+        hint: 'On-time payments keep the published average. Late payments raise the APR and lower the chance of approval.',
+        options: [
+          { value: 'ontime', label: 'On time' },
+          { value: 'late2y', label: 'A late payment more than a year ago' },
+          { value: 'late1y', label: 'A late payment in the last year' },
+          { value: 'serious', label: 'Several late payments or a collection' },
+        ],
+      },
+      {
+        key: 'utilization',
+        label: 'Card balances',
+        kind: 'select',
+        hint: 'Balances compared with credit limits.',
+        options: [
+          { value: 'under10', label: 'Under 10%' },
+          { value: 'under30', label: '10–29%' },
+          { value: 'under50', label: '30–49%' },
+          { value: 'over50', label: '50% or more' },
+          { value: 'none', label: 'No cards' },
+        ],
+      },
+      {
+        key: 'age',
+        label: 'Credit length',
+        kind: 'select',
+        hint: 'How long the oldest account has been open.',
+        options: [
+          { value: 'under2', label: 'Under 2 years' },
+          { value: '2to4', label: '2–4 years' },
+          { value: '5to9', label: '5–9 years' },
+          { value: '10plus', label: '10 years or more' },
+        ],
+      },
+      {
+        key: 'inquiries',
+        label: 'Applications in the last year',
+        kind: 'select',
+        options: [
+          { value: 'none', label: 'None' },
+          { value: 'few', label: '1 or 2' },
+          { value: 'many', label: '3 or more' },
+        ],
+      },
+      {
+        key: 'mix',
+        label: 'Accounts',
+        kind: 'select',
+        options: [
+          { value: 'both', label: 'Cards and a loan' },
+          { value: 'cards', label: 'Cards only' },
+          { value: 'thin', label: 'One account, or not sure' },
+        ],
+      },
+      {
+        key: 'product',
+        label: 'Loan',
+        kind: 'select',
+        hint: 'The loan you want. Published averages for that loan are adjusted for history, credit length, and debt.',
+        options: [
+          { value: 'mortgage30', label: '30-year mortgage' },
+          { value: 'mortgage15', label: '15-year mortgage' },
+          { value: 'autonew', label: 'New car' },
+          { value: 'autoused', label: 'Used car' },
+          { value: 'personal36', label: '3-year personal loan' },
+          { value: 'personal60', label: '5-year personal loan' },
+        ],
+      },
+      {
+        key: 'amount',
+        label: 'Amount',
+        kind: 'number',
+        prefix: '$',
+        min: 0,
+        ...amountMax,
+        hint: 'Optional. Shows a sample monthly payment at the estimated APR.',
+      },
+      {
+        key: 'debt',
+        label: 'Monthly debt',
+        kind: 'number',
+        prefix: '$',
+        min: 0,
+        ...amountMax,
+        hint: 'Cards, loans, and other debts you already pay each month.',
+      },
+      {
+        key: 'income',
+        label: 'Monthly income',
+        kind: 'number',
+        prefix: '$',
+        min: 0,
+        ...amountMax,
+        hint: 'Gross pay each month. With the debt and this loan, it sets the chance of approval. Leave it at 0 to leave income out.',
+      },
+    ],
+    compute: computeApr,
   },
   {
     id: 'salestax',
@@ -1368,8 +1662,8 @@ export const calculators = [
         max: 12,
         addLabel: 'Add subscription',
         itemNoun: 'subscription',
-        blank: { service: 'custom', name: '', price: '' },
-        hint: 'Pick a service or choose Custom and type the monthly price.',
+        blank: { service: 'custom', name: '', price: '', comment: '' },
+        hint: 'The monthly amount starts at the list price. Type over it when the price changes, or clear it to use the list price again. A comment is your own description.',
         columns: [
           {
             key: 'service',
@@ -1380,6 +1674,14 @@ export const calculators = [
               ...subscriptionCatalog.map((service) => ({ value: service.id, label: `${service.group} · ${service.name}` })),
               { value: 'custom', label: 'Custom' },
             ],
+          },
+          {
+            key: 'comment',
+            label: 'Comment',
+            type: 'text',
+            wide: true,
+            placeholder: 'Description',
+            spellcheck: true,
           },
           {
             key: 'name',
@@ -1394,9 +1696,9 @@ export const calculators = [
             label: 'Monthly',
             type: 'number',
             prefix: '$',
-            readOnly: (row) => row.service !== 'custom',
             value: (row, rowValues) => {
-              if (row.service === 'custom') return row.price
+              if (String(row.price || '').trim()) return row.price
+              if (row.service === 'custom') return ''
               const service = subscriptionById(row.service)
               const quote = quoteSubscription(service, rowValues.discount, rowValues.billing)
               if (!quote) return ''
@@ -1514,6 +1816,108 @@ export const calculators = [
     compute: computeRetirement,
   },
   {
+    id: 'percent',
+    name: 'Percentage',
+    group: 'Planning',
+    icon: 'slide',
+    description: 'Yearly total for a percent of hourly, weekly, biweekly, monthly, or annual income.',
+    defaults: {
+      income: '80000',
+      paid: 'annual',
+      hours: '40',
+      weeks: '52',
+      percent: '20',
+    },
+    examples: [
+      { name: 'Twenty percent', values: { income: '80000', paid: 'annual', percent: '20' } },
+      { name: 'A third of monthly pay', values: { income: '6000', paid: 'monthly', percent: '30' } },
+      { name: 'Ten percent of a weekly paycheck', values: { income: '1000', paid: 'weekly', percent: '10' } },
+      { name: 'Twenty percent of an hourly wage', values: { income: '25', paid: 'hourly', hours: '40', weeks: '52', percent: '20' } },
+    ],
+    fields: [
+      {
+        key: 'income',
+        label: 'Income',
+        kind: 'number',
+        prefix: '$',
+        min: 0,
+        ...amountMax,
+        required: true,
+        hint: (values) => (values.paid === 'hourly' ? 'Pay for one hour.' : ''),
+      },
+      {
+        key: 'paid',
+        label: 'Paid',
+        kind: 'segment',
+        options: [
+          { value: 'hourly', label: 'Hourly' },
+          { value: 'weekly', label: 'Weekly' },
+          { value: 'biweekly', label: 'Biweekly' },
+          { value: 'monthly', label: 'Monthly' },
+          { value: 'annual', label: 'Annual' },
+        ],
+        hint: 'How often this income is paid. Hourly is one hour of pay. Biweekly is 26 paychecks a year.',
+      },
+      {
+        key: 'hours',
+        label: 'Hours per week',
+        kind: 'number',
+        min: 0,
+        max: 168,
+        required: true,
+        showIf: (values) => values.paid === 'hourly',
+        hint: 'Paid hours in a normal week. 40 is full time.',
+      },
+      {
+        key: 'weeks',
+        label: 'Weeks per year',
+        kind: 'number',
+        min: 0,
+        max: 52,
+        required: true,
+        showIf: (values) => values.paid === 'hourly',
+        hint: '52 is a full year. Use fewer for unpaid time off.',
+      },
+      {
+        key: 'percent',
+        label: 'Percent of income',
+        kind: 'slider',
+        min: 0,
+        max: 100,
+        step: 1,
+        suffix: '%',
+        hint: 'Drag to choose the share of this income.',
+      },
+    ],
+    compute: computePercent,
+  },
+  {
+    id: 'diminish',
+    name: 'Capital diminishing',
+    group: 'Net worth',
+    icon: 'diminish',
+    description: 'Remaining capital of an asset after a fixed depreciation rate is applied to the value left each year.',
+    defaults: {
+      cost: '30000',
+      rate: '20',
+      years: '5',
+      months: '0',
+      days: '0',
+      salvage: '0',
+    },
+    examples: [
+      { name: 'Car at 20%', values: { cost: '30000', rate: '20', years: '5', salvage: '0' } },
+      { name: 'Equipment with a salvage floor', values: { cost: '30000', rate: '20', years: '5', salvage: '10000' } },
+    ],
+    fields: [
+      { key: 'cost', label: 'Asset cost', kind: 'number', prefix: '$', min: 0, ...amountMax, required: true, hint: 'Capital at the start.' },
+      { key: 'rate', label: 'Depreciation rate', kind: 'number', suffix: '%', min: 0, max: 100, required: true, hint: 'Fixed percent of the remaining capital, taken off once a year.' },
+      termField('time', 'Time', ['years', 'months', 'days']),
+      { key: 'salvage', label: 'Salvage value', kind: 'number', prefix: '$', min: 0, ...amountMax, hint: 'Depreciation stops at this amount. Leave it at 0 to let the capital fall toward nothing.' },
+    ],
+    compute: computeDiminish,
+  },
+  {
     id: 'networth',
     name: 'Net worth',
     group: 'Net worth',
@@ -1579,7 +1983,7 @@ export const calculators = [
       { name: 'Euros to yen', values: { amount: '250', from: 'EUR', to: 'JPY', query: '' } },
     ],
     fields: [
-      { key: 'amount', label: 'Amount', kind: 'number', min: 0, ...amountMax },
+      { key: 'amount', label: 'Amount', kind: 'number', min: 0, ...amountMax, required: true },
       {
         key: 'from',
         label: 'From',
@@ -1610,7 +2014,7 @@ export const calculators = [
     name: 'Wage',
     group: 'Pay',
     icon: 'wage',
-    description: 'Gross and take-home pay from an hourly rate or a salary, with state tax defaults or amounts you fill in.',
+    description: 'Gross and take-home pay from an hourly rate or a salary. A paystub can be dollars or percents for Social Security, taxes, and retirement.',
     defaults: {
       mode: 'hourly',
       rate: '25',
@@ -1655,16 +2059,110 @@ export const calculators = [
       },
       { key: 'hours', label: 'Hours per week', kind: 'number', min: 0, max: 168, required: true, hint: 'Paid hours in a normal week.' },
       { key: 'weeks', label: 'Weeks per year', kind: 'number', min: 0, max: 52, required: true, hint: '52 is a full year. Use fewer for unpaid time off.' },
-      ...taxFields({ includeState: true, customHint: 'Amount for the year.' }),
+      ...taxFields({ includeState: true }),
     ],
     compute: computeWage,
+  },
+  {
+    id: 'payrate',
+    name: 'Pay rate',
+    group: 'Pay',
+    icon: 'clock',
+    description: 'Hourly, daily, weekly, and monthly pay from a salary or a wage, with the rate after a raise and at a 40-hour year.',
+    defaults: {
+      mode: 'salary',
+      salary: '80000',
+      rate: '25',
+      daily: '200',
+      weekly: '1000',
+      monthly: '5000',
+      hoursPerDay: '8',
+      daysPerWeek: '5',
+      weeks: '52',
+      raise: '0',
+    },
+    examples: [
+      { name: '$80,000 salary', values: { mode: 'salary', salary: '80000', hoursPerDay: '8', daysPerWeek: '5', weeks: '52', raise: '0' } },
+      { name: '$25 an hour', values: { mode: 'hourly', rate: '25', hoursPerDay: '8', daysPerWeek: '5', weeks: '52', raise: '0' } },
+      { name: 'Four-day week', values: { mode: 'salary', salary: '80000', hoursPerDay: '8', daysPerWeek: '4', weeks: '52', raise: '0' } },
+      { name: 'With a 5% raise', values: { mode: 'salary', salary: '80000', hoursPerDay: '8', daysPerWeek: '5', weeks: '52', raise: '5' } },
+    ],
+    fields: [
+      {
+        key: 'mode',
+        label: 'Start from',
+        kind: 'segment',
+        options: [
+          { value: 'salary', label: 'Salary' },
+          { value: 'hourly', label: 'Hourly' },
+          { value: 'daily', label: 'Daily' },
+          { value: 'weekly', label: 'Weekly' },
+          { value: 'monthly', label: 'Monthly' },
+        ],
+      },
+      {
+        key: 'salary',
+        label: 'Annual salary',
+        kind: 'number',
+        prefix: '$',
+        min: 0,
+        ...amountMax,
+        required: true,
+        showIf: (values) => values.mode === 'salary',
+      },
+      {
+        key: 'rate',
+        label: 'Hourly rate',
+        kind: 'number',
+        prefix: '$',
+        min: 0,
+        ...amountMax,
+        required: true,
+        showIf: (values) => values.mode === 'hourly',
+      },
+      {
+        key: 'daily',
+        label: 'Daily pay',
+        kind: 'number',
+        prefix: '$',
+        min: 0,
+        ...amountMax,
+        required: true,
+        showIf: (values) => values.mode === 'daily',
+      },
+      {
+        key: 'weekly',
+        label: 'Weekly pay',
+        kind: 'number',
+        prefix: '$',
+        min: 0,
+        ...amountMax,
+        required: true,
+        showIf: (values) => values.mode === 'weekly',
+      },
+      {
+        key: 'monthly',
+        label: 'Monthly pay',
+        kind: 'number',
+        prefix: '$',
+        min: 0,
+        ...amountMax,
+        required: true,
+        showIf: (values) => values.mode === 'monthly',
+      },
+      { key: 'hoursPerDay', label: 'Hours per day', kind: 'number', min: 0, max: 24, required: true, hint: 'Paid hours in a workday. Daily pay is the hourly rate times this.' },
+      { key: 'daysPerWeek', label: 'Days per week', kind: 'number', min: 0, max: 7, required: true, hint: 'Paid days in a normal week.' },
+      { key: 'weeks', label: 'Weeks per year', kind: 'number', min: 0, max: 52, required: true, hint: '52 is a full year. Use fewer for unpaid time off.' },
+      { key: 'raise', label: 'Raise', kind: 'number', suffix: '%', min: 0, max: 100, hint: 'Optional. Shows each period after a raise of this size.' },
+    ],
+    compute: computePayRate,
   },
   {
     id: 'overtime',
     name: 'Overtime',
     group: 'Pay',
     icon: 'overtime',
-    description: 'Gross and take-home pay for one workweek, using how that state regulates overtime.',
+    description: 'Gross and take-home pay for one workweek, using how that state regulates overtime. A paystub can be dollars or percents.',
     defaults: {
       state: 'CA',
       rate: '20',
@@ -1681,6 +2179,7 @@ export const calculators = [
       oregon: 'general',
       query: '',
       ...taxDefaults,
+      stubPeriod: 'weekly',
     },
     examples: [
       {
@@ -1752,7 +2251,7 @@ export const calculators = [
         spellcheck: false,
         hint: 'Filters the state rules below.',
       },
-      ...taxFields({ includeState: false, customHint: 'Amount for this week.' }),
+      ...taxFields({ includeState: false }),
     ],
     compute: computeOvertime,
   },
@@ -1838,9 +2337,55 @@ export function visibleFields(calc, values) {
   return calc.fields.filter((field) => !field.showIf || field.showIf(values))
 }
 
+function sameStoredValue(left, right) {
+  return String(left ?? '') === String(right ?? '')
+}
+
+export function fieldsForReport(calc, values, enteredOnly = false) {
+  const fields = visibleFields(calc, values)
+  if (!enteredOnly) return fields
+  return fields.filter((field) => {
+    if (field.kind === 'span') {
+      return field.parts.some((part) => !sameStoredValue(values[part.key], calc.defaults[part.key]))
+    }
+    return !sameStoredValue(values[field.key], calc.defaults[field.key])
+  })
+}
+
 export function defaultInputs() {
   const inputs = {}
   for (const calc of calculators) inputs[calc.id] = { ...calc.defaults }
+  return inputs
+}
+
+function blankFieldValue(field) {
+  if (field.kind === 'number' || field.kind === 'slider' || field.kind === 'text' || field.kind === 'keypad') return ''
+  if (field.kind === 'items') return JSON.stringify([{ comment: '', price: '', quantity: '' }])
+  if (field.kind === 'lines') {
+    const blank = { ...(field.blank || { amount: '' }) }
+    for (const key of Object.keys(blank)) {
+      if (key === 'kind' || key === 'service') continue
+      blank[key] = ''
+    }
+    return JSON.stringify([blank])
+  }
+  return null
+}
+
+export function blankInputs() {
+  const inputs = {}
+  for (const calc of calculators) {
+    const next = { ...calc.defaults }
+    for (const field of calc.fields) {
+      if (field.kind === 'span') {
+        for (const part of field.parts) next[part.key] = ''
+        continue
+      }
+      const cleared = blankFieldValue(field)
+      if (cleared !== null) next[field.key] = cleared
+    }
+    inputs[calc.id] = next
+  }
   return inputs
 }
 
@@ -1867,7 +2412,7 @@ function readFields(calc, values) {
       }
       continue
     }
-    if (field.kind !== 'number') continue
+    if (field.kind !== 'number' && field.kind !== 'slider') continue
     const parsed = readNumeric(values[field.key], field.required)
     if (parsed.error) fieldErrors[field.key] = parsed.error
     else if (field.min !== undefined && parsed.value < field.min) fieldErrors[field.key] = `Must be at least ${field.min}`
@@ -2151,15 +2696,49 @@ function carLoanSuggestion(numbers, salesTax) {
   }
 }
 
-function mortgageSuggestion(numbers, months, escrow) {
+function vaFundingRate(down, price, use) {
+  if (use === 'exempt' || !(price > 0)) return 0
+  const downCents = Math.round(down * 100)
+  const priceCents = Math.round(price * 100)
+  if (downCents * 10 >= priceCents) return 0.0125
+  if (downCents * 20 >= priceCents) return 0.015
+  return use === 'subsequent' ? 0.033 : 0.0215
+}
+
+function vaFundingReason(down, price, use) {
+  if (use === 'exempt') return 'The funding fee is $0 because this borrower is exempt.'
+  const downCents = Math.round(down * 100)
+  const priceCents = Math.round(price * 100)
+  const band = downCents * 10 >= priceCents
+    ? 'with 10% or more down'
+    : downCents * 20 >= priceCents
+      ? 'with 5% or more down'
+      : 'with less than 5% down'
+  const which = use === 'subsequent' ? 'A later use of a VA loan' : 'The first use of a VA loan'
+  return `${which} ${band} uses the VA purchase funding fee in effect since April 7, 2023.`
+}
+
+function mortgageSuggestion(numbers, months, escrow, options = {}) {
+  const va = options.va === true
+  const principal = options.principal
   const twentyDown = numbers.down + 0.005 >= numbers.price * 0.2
   const withinFifteen = months <= 180 + 1e-6
-  if (twentyDown && withinFifteen) {
-    const base = scheduledPayment(numbers.price - numbers.down, numbers.annualRate, months)
+  if ((va || twentyDown) && withinFifteen) {
+    const base = scheduledPayment(va ? principal : numbers.price - numbers.down, numbers.annualRate, months)
     if (base == null) return null
     return {
       payment: base * 13 / 12 + escrow,
-      note: 'Suggested payment adds one extra principal payment a year. That is a common way to shorten a mortgage that already has 20% down and a term of 15 years or less.',
+      note: va
+        ? 'Suggested payment adds one extra principal payment a year. A VA loan has no monthly mortgage insurance, so this keeps the down payment you entered.'
+        : 'Suggested payment adds one extra principal payment a year. That is a common way to shorten a mortgage that already has 20% down and a term of 15 years or less.',
+    }
+  }
+  if (va) {
+    const payment = scheduledPayment(principal, numbers.annualRate, 180)
+    if (payment == null) return null
+    return {
+      payment: payment + escrow,
+      note: 'Suggested payment is a 15-year schedule on this VA loan. VA loans do not charge monthly mortgage insurance, so the down payment stays the one you entered.',
     }
   }
   const down = Math.max(numbers.down, numbers.price * 0.2)
@@ -2688,7 +3267,13 @@ function computeMortgage(values) {
   }
   const months = termMonths(fieldErrors, numbers, 'years', 'months', 'days', 'term')
   if (Object.keys(fieldErrors).length || months === null) return fail(fieldErrors)
-  const loanAmount = numbers.price - numbers.down
+  const va = values.loanType === 'va'
+  const baseLoan = numbers.price - numbers.down
+  const fundingFeeRate = va ? vaFundingRate(numbers.down, numbers.price, values.vaUse) : 0
+  const fundingFee = Math.round(baseLoan * fundingFeeRate * 100) / 100
+  const rollFee = va && fundingFee > 0 && values.vaFeeMode !== 'upfront'
+  const loanAmount = baseLoan + (rollFee ? fundingFee : 0)
+  const dueAtClosing = numbers.down + (rollFee ? 0 : fundingFee)
 
   const built = loanResult(loanAmount, numbers.annualRate, months, numbers.extra, 'Principal and interest')
   if (!built.ok) return built
@@ -2706,11 +3291,20 @@ function computeMortgage(values) {
   stats.push(
     { label: 'Loan amount', value: money(loanAmount) },
     { label: 'Down payment', value: `${money(numbers.down)} · ${percentNumber(downPercent * 100)}` },
+  )
+  if (va) {
+    stats.push({
+      label: 'VA funding fee',
+      value: `${money(fundingFee)} · ${percentNumber(fundingFeeRate * 100)}`,
+    })
+    if (!rollFee && fundingFee > 0) stats.push({ label: 'Due at closing', value: money(dueAtClosing) })
+  }
+  stats.push(
     { label: 'Total interest', value: money(built.value.totalInterest), tone: 'negative' },
     { label: 'Payoff', value: formatDuration(built.value.payoffMonths) },
   )
   const escrow = taxMonth + insuranceMonth + numbers.hoa
-  const suggestion = mortgageSuggestion(numbers, months, escrow)
+  const suggestion = mortgageSuggestion(numbers, months, escrow, { va, principal: loanAmount })
   if (suggestion) stats.push({ label: 'Suggested payment', value: money(suggestion.payment) })
 
   const formula = [
@@ -2718,7 +3312,21 @@ function computeMortgage(values) {
     '',
     `Home price = ${money(numbers.price)}`,
     `Down payment = ${money(numbers.down)} (${percentNumber(downPercent * 100)})`,
-    `Loan amount = ${money(loanAmount)}`,
+    ...(va
+      ? [
+          `Loan before funding fee = ${money(baseLoan)}`,
+          `VA funding fee = ${money(baseLoan)} × ${percentNumber(fundingFeeRate * 100)} = ${money(fundingFee)}`,
+          rollFee
+            ? `Loan amount = ${money(baseLoan)} + ${money(fundingFee)} = ${money(loanAmount)}`
+            : `Loan amount = ${money(loanAmount)}`,
+          vaFundingReason(numbers.down, numbers.price, values.vaUse),
+          rollFee
+            ? 'The funding fee is financed, so principal and interest include it. VA loans have no monthly mortgage insurance.'
+            : fundingFee > 0
+              ? 'The funding fee is paid at closing and is not part of the loan. VA loans have no monthly mortgage insurance.'
+              : 'No funding fee is added. VA loans have no monthly mortgage insurance.',
+        ]
+      : [`Loan amount = ${money(loanAmount)}`]),
     `Taxes = ${money(taxMonth)} / month`,
     `Insurance = ${money(insuranceMonth)} / month`,
     `HOA = ${money(numbers.hoa)} / month`,
@@ -2742,6 +3350,10 @@ function computeMortgage(values) {
         ...built.result.raw,
         monthlyHousing: housing,
         loanAmount,
+        baseLoan,
+        fundingFee,
+        fundingFeeRate,
+        dueAtClosing,
         suggestedPayment: suggestion ? suggestion.payment : null,
       },
       schedule: {
@@ -3126,6 +3738,99 @@ function readWorthEntries(values, fieldErrors) {
   return items
 }
 
+function computeDiminish(values) {
+  const calc = getCalculator('diminish')
+  const { fieldErrors, numbers } = readFields(calc, values)
+  requirePositive(fieldErrors, numbers, 'cost', 'Enter a cost greater than zero')
+  const months = termMonths(fieldErrors, numbers, 'years', 'months', 'days', 'time')
+  if (!fieldErrors.salvage && numbers.salvage !== undefined && numbers.cost !== undefined && numbers.salvage > numbers.cost) {
+    fieldErrors.salvage = 'Salvage value cannot be more than the cost'
+  }
+  if (Object.keys(fieldErrors).length || months === null) return fail(fieldErrors)
+
+  const rate = numbers.rate / 100
+  const years = months / 12
+  const salvage = numbers.salvage
+  const whole = Math.floor(years + 1e-9)
+  const fraction = years - whole
+  const slices = []
+  for (let year = 1; year <= whole; year += 1) slices.push({ label: String(year), length: 1 })
+  if (fraction > 1e-8) slices.push({ label: formatDuration(fraction * 12), length: fraction })
+
+  let book = numbers.cost
+  const rows = []
+  for (const slice of slices) {
+    const next = Math.max(salvage, book * (1 - rate) ** slice.length)
+    rows.push({
+      period: slice.label,
+      opening: book,
+      depreciation: book - next,
+      closing: next,
+    })
+    book = next
+  }
+  const remaining = book
+  const lost = numbers.cost - remaining
+  const balances = [numbers.cost, ...rows.map((row) => row.closing)]
+  const reachedSalvage = salvage > 0 && remaining <= salvage + 0.005 && lost + 0.005 < numbers.cost * (1 - (1 - rate) ** years)
+
+  return {
+    ok: true,
+    result: {
+      headline: {
+        label: 'Remaining capital',
+        value: money(remaining),
+        detail: `${money(lost)} depreciated from ${money(numbers.cost)}`,
+      },
+      stats: [
+        { label: 'Depreciation', value: money(lost), tone: lost > 0 ? 'negative' : undefined },
+        { label: 'Rate', value: percentNumber(numbers.rate) },
+        { label: 'Time', value: formatDuration(months) },
+        { label: 'Salvage value', value: money(salvage) },
+      ],
+      chart: balanceChart(
+        'Capital',
+        balances,
+        ['Start', formatDuration(months)],
+        salvage > 0 ? [{ value: salvage, label: 'Salvage' }] : [],
+        `Capital over ${formatDuration(months)}`,
+      ),
+      schedule: scheduleFromRows(
+        [
+          { key: 'period', label: 'Year', align: 'left' },
+          { key: 'opening', label: 'Opening', align: 'right' },
+          { key: 'depreciation', label: 'Depreciation', align: 'right' },
+          { key: 'closing', label: 'Closing', align: 'right' },
+        ],
+        rows.map((row) => ({
+          period: row.period,
+          opening: money(row.opening),
+          depreciation: money(row.depreciation),
+          closing: money(row.closing),
+        })),
+      ),
+      formula: [
+        'Remaining capital = cost × (1 − rate)^years',
+        'Depreciation for a full year = capital at the start of that year × rate',
+        'A partial year uses the same rate for that fraction of a year.',
+        'Remaining capital does not fall below the salvage value.',
+        '',
+        `Cost = ${money(numbers.cost)}`,
+        `Rate = ${percentNumber(numbers.rate)}`,
+        `Years = ${plain(years, Number.isInteger(years) ? 0 : 2)}`,
+        `Salvage value = ${money(salvage)}`,
+        `Remaining capital = ${money(remaining)}`,
+        `Depreciation = ${money(lost)}`,
+        '',
+        'This is the reducing-balance formula. It is not a tax depreciation schedule.',
+        ...(reachedSalvage ? ['The salvage value stopped depreciation before the rate alone would have.'] : []),
+      ],
+      summary: `Remaining capital ${money(remaining)}`,
+      raw: { remaining, depreciation: lost, years, rate: numbers.rate },
+    },
+  }
+}
+
 function computeNetWorth(values) {
   const fieldErrors = {}
   const custom = readWorthEntries(values, fieldErrors)
@@ -3394,6 +4099,10 @@ function readSaleComment(fieldErrors, key, raw) {
 
 function readSaleLine(item, index, fieldErrors) {
   const prefix = `item-${index}`
+  const commentText = String(item.comment || '').trim()
+  const priceText = String(item.price || '').trim()
+  const quantityText = String(item.quantity || '').trim()
+  if (!commentText && !priceText && !quantityText) return null
   const comment = readSaleComment(fieldErrors, `${prefix}-comment`, item.comment)
   const price = parseLooseNumber(item.price)
   if (price === null) fieldErrors[`${prefix}-price`] = 'Enter a number'
@@ -3628,7 +4337,7 @@ function computeCreditCard(values) {
     return fail({
       ...fieldErrors,
       ...blocking,
-      ...(anyRow ? {} : { cards: 'Add a card' }),
+      ...(anyRow ? {} : { 'cards-0-balance': 'Enter a number' }),
     })
   }
   if (Object.keys(fieldErrors).length) return fail({ ...fieldErrors, ...blocking, ...warnings })
@@ -4084,34 +4793,75 @@ function kentuckyOvertime(days) {
   return { regular: total - ot, ot, doubleTime: 0 }
 }
 
+function paystubLine(raw, { gross, week, period, stubGross, asPercent }) {
+  const entered = raw || 0
+  if (asPercent) return gross * entered / 100
+  if (stubGross > 0) return gross * entered / stubGross
+  const perYear = STUB_PERIODS[period] || 1
+  const annual = entered * perYear
+  return week ? annual / 52 : annual
+}
+
+function deductionRates(items, gross) {
+  const rate = (amount) => (gross > 0 ? amount / gross : 0)
+  return {
+    social: rate(items.social),
+    medicare: rate(items.medicare),
+    federal: rate(items.federal),
+    stateTax: rate(items.stateTax),
+    payroll: rate(items.payroll),
+    traditional: rate(items.traditional),
+    roth: rate(items.roth),
+    health: rate(items.health),
+    vision: rate(items.vision),
+    dental: rate(items.dental),
+    hsa: rate(items.hsa),
+    other: rate(items.other),
+  }
+}
+
 function payDeductions(values, numbers, gross, fieldErrors, { week, state }) {
   if (!TAX_STATE_CODES.includes(state)) {
     fieldErrors[week ? 'state' : 'taxState'] = 'Choose a state'
     return null
   }
   if (values.taxes === 'custom') {
+    const asPercent = values.stubEntry === 'percent'
+    const stubGross = asPercent ? 0 : (numbers.stubGross || 0)
+    const period = values.stubPeriod || (week ? 'weekly' : 'annual')
+    const line = (raw) => paystubLine(raw, { gross, week, period, stubGross, asPercent })
     const items = {
-      social: numbers.social || 0,
-      medicare: numbers.medicare || 0,
-      federal: numbers.federal || 0,
-      stateTax: numbers.stateTax || 0,
-      payroll: numbers.payroll || 0,
+      social: line(asPercent ? numbers.socialRate : numbers.social),
+      medicare: line(asPercent ? numbers.medicareRate : numbers.medicare),
+      federal: line(asPercent ? numbers.federalRate : numbers.federal),
+      stateTax: line(asPercent ? numbers.stateRate : numbers.stateTax),
+      payroll: line(asPercent ? numbers.payrollRate : numbers.payroll),
       payrollName: 'State payroll tax',
-      traditional: numbers.retirementAmount || 0,
+      traditional: line(asPercent ? numbers.retirementRate : numbers.retirementAmount),
       roth: 0,
-      health: numbers.healthAmount || 0,
-      vision: numbers.visionAmount || 0,
-      dental: numbers.dentalAmount || 0,
-      hsa: numbers.hsaAmount || 0,
-      other: numbers.otherAmount || 0,
+      health: line(asPercent ? numbers.healthRate : numbers.healthAmount),
+      vision: line(asPercent ? numbers.visionRate : numbers.visionAmount),
+      dental: line(asPercent ? numbers.dentalRate : numbers.dentalAmount),
+      hsa: line(asPercent ? numbers.hsaRate : numbers.hsaAmount),
+      other: line(asPercent ? numbers.otherRate : numbers.otherAmount),
     }
     const sum = items.social + items.medicare + items.federal + items.stateTax + items.payroll
       + items.traditional + items.health + items.vision + items.dental + items.hsa + items.other
     if (sum > gross + 0.004) {
-      fieldErrors.social = 'These amounts are larger than pay'
+      fieldErrors[asPercent ? 'socialRate' : 'social'] = 'These amounts are larger than pay'
       return null
     }
-    return { ...items, preTax: items.health + items.vision + items.dental + items.hsa + items.other, takeHome: gross - sum, capped: false, estimated: false, stateLabel: '' }
+    return {
+      ...items,
+      rates: deductionRates(items, gross),
+      preTax: items.health + items.vision + items.dental + items.hsa + items.other,
+      takeHome: gross - sum,
+      capped: false,
+      estimated: false,
+      fromPercent: asPercent,
+      fromStub: stubGross > 0,
+      stateLabel: '',
+    }
   }
 
   const monthly = {
@@ -4140,13 +4890,12 @@ function payDeductions(values, numbers, gross, fieldErrors, { week, state }) {
   }
   const scale = week ? 1 / 52 : 1
   const year = (amount) => amount * 12 * scale
-  return {
+  const items = {
     social: figured.social * scale,
     medicare: figured.medicare * scale,
     federal: figured.federal * scale,
     stateTax: figured.stateTax * scale,
     payroll: figured.payroll * scale,
-    payrollName: figured.payrollName,
     traditional: figured.traditional * scale,
     roth: figured.roth * scale,
     health: year(monthly.health),
@@ -4154,56 +4903,78 @@ function payDeductions(values, numbers, gross, fieldErrors, { week, state }) {
     dental: year(monthly.dental),
     hsa: year(monthly.hsa),
     other: year(monthly.other),
+  }
+  return {
+    ...items,
+    rates: deductionRates(items, gross),
+    payrollName: figured.payrollName,
     preTax: figured.preTax * scale,
     takeHome: figured.takeHome * scale,
     capped: requested > RETIREMENT_LIMIT + 0.004,
     estimated: true,
+    fromPercent: false,
+    fromStub: false,
     stateLabel: stateTaxDetail(state),
   }
 }
 
+function deductionShare(amount, rate) {
+  const pct = (rate || 0) * 100
+  const digits = Math.abs(pct - Math.round(pct)) < 0.001 ? 0 : 2
+  return `${money(amount)} · ${percentNumber(pct, digits)}`
+}
+
 function deductionStats(tax) {
   const rows = [
-    ['Social Security', tax.social],
-    ['Medicare', tax.medicare],
-    ['Federal income tax', tax.federal],
-    ['State income tax', tax.stateTax],
+    ['Social Security', tax.social, 'social'],
+    ['Medicare', tax.medicare, 'medicare'],
+    ['Federal income tax', tax.federal, 'federal'],
+    ['State income tax', tax.stateTax, 'stateTax'],
   ]
-  if (tax.payroll > 0.004) rows.push([tax.payrollName || 'State payroll tax', tax.payroll])
-  if (tax.traditional > 0.004) rows.push(['401(k)', tax.traditional])
-  if (tax.roth > 0.004) rows.push(['Roth 401(k)', tax.roth])
-  for (const [label, amount] of [
-    ['Health insurance', tax.health],
-    ['Vision', tax.vision],
-    ['Dental', tax.dental],
-    ['HSA', tax.hsa],
-    ['Other', tax.other],
+  if (tax.payroll > 0.004) rows.push([tax.payrollName || 'State payroll tax', tax.payroll, 'payroll'])
+  if (tax.traditional > 0.004) rows.push(['401(k)', tax.traditional, 'traditional'])
+  if (tax.roth > 0.004) rows.push(['Roth 401(k)', tax.roth, 'roth'])
+  for (const [label, amount, key] of [
+    ['Health insurance', tax.health, 'health'],
+    ['Vision', tax.vision, 'vision'],
+    ['Dental', tax.dental, 'dental'],
+    ['HSA', tax.hsa, 'hsa'],
+    ['Other', tax.other, 'other'],
   ]) {
-    if (amount > 0.004) rows.push([label, amount])
+    if (amount > 0.004) rows.push([label, amount, key])
   }
-  return rows.map(([label, amount]) => ({
+  return rows.map(([label, amount, key]) => ({
     label,
-    value: money(amount),
+    value: amount > 0.004 ? deductionShare(amount, tax.rates?.[key]) : money(amount),
     tone: amount > 0.004 ? 'negative' : undefined,
   }))
+}
+
+function deductionLine(label, amount, rate) {
+  if (!(amount > 0.004)) return `${label} = ${money(amount)}`
+  return `${label} = ${deductionShare(amount, rate)} of gross`
 }
 
 function deductionFormula(tax, filingLabel) {
   const lines = [
     tax.estimated
       ? 'Social Security is 6.2% of wages up to $184,500. Medicare is 1.45%, plus 0.9% of wages over $200,000.'
-      : 'Filled-in amounts are subtracted from pay as entered.',
+      : tax.fromPercent
+        ? 'Percents from the paystub are multiplied by this gross pay.'
+        : tax.fromStub
+          ? 'Each paystub line is divided by the paystub gross. That percent is applied to this pay.'
+          : 'Paystub amounts are scaled to this pay, then shown as a percent of gross.',
     tax.estimated ? 'A traditional 401(k) lowers income tax and stays subject to Social Security and Medicare. Health, vision, dental, HSA, and other pre-tax amounts lower both.' : '',
     tax.estimated ? tax.stateLabel : '',
     tax.estimated ? `Filing status = ${filingLabel}` : '',
-    `Social Security = ${money(tax.social)}`,
-    `Medicare = ${money(tax.medicare)}`,
-    `Federal income tax = ${money(tax.federal)}`,
-    `State income tax = ${money(tax.stateTax)}`,
-    tax.payroll > 0.004 ? `${tax.payrollName || 'State payroll tax'} = ${money(tax.payroll)}` : '',
-    tax.traditional > 0.004 ? `401(k) = ${money(tax.traditional)}` : '',
-    tax.roth > 0.004 ? `Roth 401(k) = ${money(tax.roth)}` : '',
-    tax.preTax > 0.004 ? `Pre-tax benefits = ${money(tax.preTax)}` : '',
+    deductionLine('Social Security', tax.social, tax.rates?.social),
+    deductionLine('Medicare', tax.medicare, tax.rates?.medicare),
+    deductionLine('Federal income tax', tax.federal, tax.rates?.federal),
+    deductionLine('State income tax', tax.stateTax, tax.rates?.stateTax),
+    tax.payroll > 0.004 ? deductionLine(tax.payrollName || 'State payroll tax', tax.payroll, tax.rates?.payroll) : '',
+    tax.traditional > 0.004 ? deductionLine('401(k)', tax.traditional, tax.rates?.traditional) : '',
+    tax.roth > 0.004 ? deductionLine('Roth 401(k)', tax.roth, tax.rates?.roth) : '',
+    tax.preTax > 0.004 ? deductionLine('Pre-tax benefits', tax.preTax, (tax.rates?.health || 0) + (tax.rates?.vision || 0) + (tax.rates?.dental || 0) + (tax.rates?.hsa || 0) + (tax.rates?.other || 0)) : '',
     `Take-home = ${money(tax.takeHome)}`,
     tax.capped ? `401(k) is capped at ${money(RETIREMENT_LIMIT)} for 2026.` : '',
     tax.estimated ? 'This leaves out local tax, dependent exemptions, credits, and phaseouts. It is a planning estimate.' : '',
@@ -4217,24 +4988,35 @@ function filingLabel(value) {
   return 'Single'
 }
 
+function subscriptionComment(row, index, fieldErrors) {
+  const comment = String(row.comment || '').trim()
+  if (comment.length > 80) fieldErrors[`services-${index}-comment`] = 'Keep the comment under 80 characters'
+  return comment
+}
+
+function readSubscriptionPrice(row, index, fieldErrors) {
+  const parsed = readNumeric(row.price, false)
+  if (parsed.error) fieldErrors[`services-${index}-price`] = parsed.error
+  else if (parsed.value < 0) fieldErrors[`services-${index}-price`] = 'Must be at least 0'
+  else if (parsed.value > 1e12) fieldErrors[`services-${index}-price`] = 'Enter a smaller amount'
+  return parsed.value
+}
+
 function computeSubscriptions(values) {
-  const rows = parseLines(values.services, { service: 'custom', name: '', price: '' })
+  const rows = parseLines(values.services, { service: 'custom', name: '', price: '', comment: '' })
   const fieldErrors = {}
   const picked = []
   rows.forEach((row, index) => {
+    const comment = subscriptionComment(row, index, fieldErrors)
     if (row.service === 'custom') {
       const name = String(row.name || '').trim()
       const priceText = String(row.price || '').trim()
-      if (!name && !priceText) return
+      if (!name && !priceText && !comment) return
       if (!name) fieldErrors[`services-${index}-name`] = 'Name this subscription'
       else if (name.length > 80) fieldErrors[`services-${index}-name`] = 'Keep the name under 80 characters'
-      const parsed = readNumeric(row.price, false)
-      const price = parsed.value
-      if (parsed.error) fieldErrors[`services-${index}-price`] = parsed.error
-      else if (price < 0) fieldErrors[`services-${index}-price`] = 'Must be at least 0'
-      else if (price > 1e12) fieldErrors[`services-${index}-price`] = 'Enter a smaller amount'
-      if (!fieldErrors[`services-${index}-name`] && !fieldErrors[`services-${index}-price`]) {
-        picked.push({ name, monthly: price, note: 'Custom price' })
+      const price = readSubscriptionPrice(row, index, fieldErrors)
+      if (!fieldErrors[`services-${index}-name`] && !fieldErrors[`services-${index}-price`] && !fieldErrors[`services-${index}-comment`]) {
+        picked.push({ name, monthly: price, note: comment || 'Custom price' })
       }
       return
     }
@@ -4244,7 +5026,19 @@ function computeSubscriptions(values) {
       return
     }
     const quote = quoteSubscription(service, values.discount, values.billing)
-    picked.push({ name: service.name, monthly: quote.monthly, note: quote.note })
+    const typed = String(row.price || '').trim()
+    let monthly = quote.monthly
+    let note = comment || quote.note
+    if (typed) {
+      const price = readSubscriptionPrice(row, index, fieldErrors)
+      if (!fieldErrors[`services-${index}-price`]) {
+        monthly = price
+        note = comment || 'Your price'
+      }
+    }
+    if (!fieldErrors[`services-${index}-price`] && !fieldErrors[`services-${index}-comment`]) {
+      picked.push({ name: service.name, monthly, note })
+    }
   })
   if (Object.keys(fieldErrors).length) return fail(fieldErrors)
   const monthly = picked.reduce((sum, row) => sum + row.monthly, 0)
@@ -4274,6 +5068,7 @@ function computeSubscriptions(values) {
       all: subscriptionAll(values.discount, values.billing),
       formula: [
         'Monthly total = sum of each subscription at the selected price.',
+        'A typed price replaces the list price. Clear it to use the list price again.',
         'Annual billing uses the yearly list price divided by 12.',
         '',
         ...picked.map((row) => `${row.name} = ${money(row.monthly)} (${row.note})`),
@@ -4334,6 +5129,147 @@ function wageAllStates(values, numbers, annual) {
     ],
     ordered.map(({ state, stateTax, takeHome }) => ({ state, stateTax, takeHome })),
   )
+}
+
+const FULL_TIME_HOURS = 8 * 5 * 52
+
+function wageFromAnnual(annual, hoursPerDay, daysPerWeek, weeks) {
+  const hoursPerYear = hoursPerDay * daysPerWeek * weeks
+  const hourly = annual / hoursPerYear
+  const daily = hourly * hoursPerDay
+  const weekly = daily * daysPerWeek
+  return {
+    hoursPerYear,
+    workdays: daysPerWeek * weeks,
+    hourly,
+    daily,
+    weekly,
+    biweekly: weekly * 2,
+    semimonthly: annual / 24,
+    monthly: annual / 12,
+    annual,
+    timeAndHalf: hourly * 1.5,
+    doubleTime: hourly * 2,
+    fullTimeHourly: annual / FULL_TIME_HOURS,
+  }
+}
+
+function annualFromPayRate(values, numbers) {
+  const hoursPerWeek = numbers.hoursPerDay * numbers.daysPerWeek
+  if (values.mode === 'hourly') return numbers.rate * hoursPerWeek * numbers.weeks
+  if (values.mode === 'daily') return numbers.daily * numbers.daysPerWeek * numbers.weeks
+  if (values.mode === 'weekly') return numbers.weekly * numbers.weeks
+  if (values.mode === 'monthly') return numbers.monthly * 12
+  return numbers.salary
+}
+
+function computePayRate(values) {
+  const calc = getCalculator('payrate')
+  const { fieldErrors, numbers } = readFields(calc, values)
+  const amountKey = { salary: 'salary', hourly: 'rate', daily: 'daily', weekly: 'weekly', monthly: 'monthly' }[values.mode]
+  if (!amountKey) return fail(fieldErrors, 'Choose a starting pay.')
+  requirePositive(fieldErrors, numbers, amountKey, 'Enter an amount greater than zero')
+  if (!fieldErrors.hoursPerDay && numbers.hoursPerDay === 0) fieldErrors.hoursPerDay = 'Enter hours greater than zero'
+  if (!fieldErrors.daysPerWeek && numbers.daysPerWeek === 0) fieldErrors.daysPerWeek = 'Enter at least 1 day'
+  if (!fieldErrors.weeks && numbers.weeks === 0) fieldErrors.weeks = 'Enter at least 1 week'
+  if (Object.keys(fieldErrors).length) return fail(fieldErrors)
+
+  const annual = annualFromPayRate(values, numbers)
+  const pay = wageFromAnnual(annual, numbers.hoursPerDay, numbers.daysPerWeek, numbers.weeks)
+  if (!Number.isFinite(pay.hourly)) return fail({}, 'Could not convert this pay.')
+  const raisedAnnual = annual * (1 + numbers.raise / 100)
+  const raised = numbers.raise > 0 ? wageFromAnnual(raisedAnnual, numbers.hoursPerDay, numbers.daysPerWeek, numbers.weeks) : null
+  const salaryMode = values.mode === 'salary'
+  const periods = [
+    ['Hourly', pay.hourly, raised?.hourly],
+    ['Daily', pay.daily, raised?.daily],
+    ['Weekly', pay.weekly, raised?.weekly],
+    ['Biweekly', pay.biweekly, raised?.biweekly],
+    ['Semimonthly', pay.semimonthly, raised?.semimonthly],
+    ['Monthly', pay.monthly, raised?.monthly],
+    ['Annual', pay.annual, raised?.annual],
+  ]
+  const stats = [
+    { label: 'Daily', value: money(pay.daily) },
+    { label: 'Weekly', value: money(pay.weekly) },
+    { label: 'Monthly', value: money(pay.monthly) },
+    { label: salaryMode ? 'Annual' : 'Hourly', value: money(salaryMode ? pay.annual : pay.hourly) },
+    { label: 'Workdays a year', value: plain(pay.workdays, Number.isInteger(pay.workdays) ? 0 : 2) },
+    { label: 'Hours a year', value: plain(pay.hoursPerYear, Number.isInteger(pay.hoursPerYear) ? 0 : 2) },
+    { label: 'Time and a half', value: money(pay.timeAndHalf) },
+    { label: 'Double time', value: money(pay.doubleTime) },
+  ]
+  if (pay.hoursPerYear !== FULL_TIME_HOURS) {
+    stats.push({ label: 'Full-time hourly', value: money(pay.fullTimeHourly) })
+  }
+  if (raised) {
+    stats.push({ label: `After a ${plain(numbers.raise, Number.isInteger(numbers.raise) ? 0 : 2)}% raise`, value: money(raised.annual) })
+    stats.push({ label: 'Raised hourly', value: money(raised.hourly) })
+  }
+  const scheduleColumns = [
+    { key: 'period', label: 'Period', align: 'left' },
+    { key: 'pay', label: 'Pay', align: 'right' },
+  ]
+  if (raised) scheduleColumns.push({ key: 'raised', label: 'After raise', align: 'right' })
+  const formula = [
+    values.mode === 'hourly'
+      ? 'Annual = hourly × hours per day × days per week × weeks per year'
+      : values.mode === 'daily'
+        ? 'Annual = daily pay × days per week × weeks per year'
+        : values.mode === 'weekly'
+          ? 'Annual = weekly pay × weeks per year'
+          : values.mode === 'monthly'
+            ? 'Annual = monthly pay × 12'
+            : 'The salary is the annual pay.',
+    'Hourly = annual / (hours per day × days per week × weeks per year)',
+    'Daily = hourly × hours per day',
+    'Weekly = daily × days per week',
+    'Biweekly = weekly × 2',
+    'Semimonthly = annual / 24',
+    'Monthly = annual / 12',
+    'Time and a half = hourly × 1.5. Double time = hourly × 2. These are comparisons, not a state overtime rule.',
+    '',
+    `Annual = ${money(pay.annual)}`,
+    `Hours a year = ${plain(pay.hoursPerYear, Number.isInteger(pay.hoursPerYear) ? 0 : 2)}`,
+    `Hourly = ${money(pay.hourly)}`,
+    `Daily = ${money(pay.daily)}`,
+    `Weekly = ${money(pay.weekly)}`,
+    `Monthly = ${money(pay.monthly)}`,
+  ]
+  if (pay.hoursPerYear === FULL_TIME_HOURS) {
+    formula.push('This schedule is 2,080 hours, the usual full-time year of 8 hours, 5 days, and 52 weeks.')
+  } else {
+    formula.push(`The same annual pay over a 2,080-hour year is ${money(pay.fullTimeHourly)} an hour.`)
+  }
+  if (raised) formula.push(`A ${plain(numbers.raise, Number.isInteger(numbers.raise) ? 0 : 2)}% raise makes annual pay ${money(raised.annual)} and hourly pay ${money(raised.hourly)}.`)
+
+  return {
+    ok: true,
+    result: {
+      headline: {
+        label: salaryMode ? 'Hourly' : 'Annual salary',
+        value: money(salaryMode ? pay.hourly : pay.annual),
+        detail: `${plain(numbers.hoursPerDay, Number.isInteger(numbers.hoursPerDay) ? 0 : 2)} hours a day · ${plain(numbers.daysPerWeek, Number.isInteger(numbers.daysPerWeek) ? 0 : 2)} days a week · ${plain(numbers.weeks, Number.isInteger(numbers.weeks) ? 0 : 2)} weeks`,
+      },
+      stats,
+      schedule: scheduleFromRows(
+        scheduleColumns,
+        periods.map(([period, amount, raisedAmount]) => ({
+          period,
+          pay: money(amount),
+          raised: raised ? money(raisedAmount) : '',
+        })),
+      ),
+      formula,
+      summary: salaryMode ? `Hourly ${money(pay.hourly)}` : `Annual salary ${money(pay.annual)}`,
+      raw: {
+        ...pay,
+        raise: numbers.raise,
+        raisedAnnual: raised?.annual ?? null,
+        raisedHourly: raised?.hourly ?? null,
+      },
+    },
+  }
 }
 
 function computeWage(values) {
@@ -4412,6 +5348,12 @@ function computeWage(values) {
         federal: tax.federal,
         stateTax: tax.stateTax,
         payroll: tax.payroll,
+        traditional: tax.traditional,
+        socialRate: tax.rates.social,
+        medicareRate: tax.rates.medicare,
+        federalRate: tax.rates.federal,
+        stateRate: tax.rates.stateTax,
+        retirementRate: tax.rates.traditional,
         afterSubscriptions: subscriptionLink() ? tax.takeHome / 12 - subscriptionLink().monthly : null,
       },
     },
@@ -4547,6 +5489,11 @@ function computeOvertime(values) {
         dailyApplied,
         listed: listed.length,
         social: tax.social,
+        federal: tax.federal,
+        traditional: tax.traditional,
+        socialRate: tax.rates.social,
+        federalRate: tax.rates.federal,
+        retirementRate: tax.rates.traditional,
         stateTax: tax.stateTax,
       },
     },
@@ -4747,6 +5694,468 @@ function expressionResult(expression, angle) {
   if (!evaluated.ok) return fail({ expression: evaluated.error })
   const shown = formatCalcNumber(evaluated.value)
   return { ok: true, shown, value: evaluated.value }
+}
+
+// Published averages, not offers. Mortgage and personal-loan rows are FICO
+// points from Curinos via Experian (mortgages October 2026, personal loans
+// September 2026). Auto rows are VantageScore bands from Experian's
+// Automotive Finance Market report, second quarter of 2026.
+const aprProducts = {
+  mortgage30: {
+    kind: 'mortgage',
+    label: '30-year mortgage',
+    months: 360,
+    model: 'fico',
+    floor: 'Published conventional mortgage averages start at a score of 620.',
+    source: 'Curinos, October 2026, via Experian. A score between two published scores sits on a straight line between them. 780 through 850 uses the 780 average.',
+    points: [[620, 8.15], [640, 8.05], [660, 7.96], [680, 7.87], [700, 7.78], [720, 7.74], [740, 7.62], [760, 7.54], [780, 7.46], [850, 7.46]],
+  },
+  mortgage15: {
+    kind: 'mortgage',
+    label: '15-year mortgage',
+    months: 180,
+    model: 'fico',
+    floor: 'Published conventional mortgage averages start at a score of 620.',
+    source: 'Curinos, October 2026, via Experian. A score between two published scores sits on a straight line between them. 780 through 850 uses the 780 average.',
+    points: [[620, 6.88], [640, 6.87], [660, 6.86], [680, 6.88], [700, 6.86], [720, 6.86], [740, 6.85], [760, 6.85], [780, 6.84], [850, 6.84]],
+  },
+  personal36: {
+    kind: 'personal',
+    label: '3-year personal loan',
+    months: 36,
+    model: 'fico',
+    floor: 'Published personal loan averages start at a score of 620.',
+    source: 'Curinos, September 2026, via Experian. The table runs from 620 to 740. A higher score uses the 740 average.',
+    points: [[620, 17.97], [640, 17.21], [660, 16.12], [680, 14.76], [700, 13.19], [720, 11.97], [740, 10.82]],
+  },
+  personal60: {
+    kind: 'personal',
+    label: '5-year personal loan',
+    months: 60,
+    model: 'fico',
+    floor: 'Published personal loan averages start at a score of 620.',
+    source: 'Curinos, September 2026, via Experian. The table runs from 620 to 740. A higher score uses the 740 average.',
+    points: [[620, 18.74], [640, 17.89], [660, 17.36], [680, 15.99], [700, 14.29], [720, 13.04], [740, 11.69]],
+  },
+  autonew: {
+    kind: 'auto',
+    label: 'New car',
+    months: 60,
+    model: 'vantage',
+    floor: 'Published new-car averages cover scores from 300 to 850.',
+    source: 'Experian Automotive Finance Market, second quarter of 2026. Each VantageScore band has one average. A FICO score with the same number can fall in a different band. The sample payment uses a 5-year term.',
+    bands: [
+      { low: 300, high: 500, name: 'Deep subprime', apr: 16.11 },
+      { low: 501, high: 600, name: 'Subprime', apr: 13.52 },
+      { low: 601, high: 660, name: 'Nonprime', apr: 9.71 },
+      { low: 661, high: 780, name: 'Prime', apr: 6.15 },
+      { low: 781, high: 850, name: 'Superprime', apr: 4.41 },
+    ],
+  },
+  autoused: {
+    kind: 'auto',
+    label: 'Used car',
+    months: 60,
+    model: 'vantage',
+    floor: 'Published used-car averages cover scores from 300 to 850.',
+    source: 'Experian Automotive Finance Market, second quarter of 2026. Each VantageScore band has one average. A FICO score with the same number can fall in a different band. The sample payment uses a 5-year term.',
+    bands: [
+      { low: 300, high: 500, name: 'Deep subprime', apr: 21.62 },
+      { low: 501, high: 600, name: 'Subprime', apr: 19.10 },
+      { low: 601, high: 660, name: 'Nonprime', apr: 13.93 },
+      { low: 661, high: 780, name: 'Prime', apr: 8.81 },
+      { low: 781, high: 850, name: 'Superprime', apr: 6.29 },
+    ],
+  },
+}
+
+const aprAdjustments = {
+  payments: { ontime: 40, late2y: -35, late1y: -80, serious: -150 },
+  utilization: { under10: 35, under30: 5, under50: -25, over50: -70, none: -15 },
+  age: { under2: -35, '2to4': -10, '5to9': 15, '10plus': 30 },
+  inquiries: { none: 10, few: 0, many: -25 },
+  mix: { both: 15, cards: 0, thin: -20 },
+}
+
+const aprFactorLabels = {
+  payments: 'Payment history',
+  utilization: 'Card balances',
+  age: 'Credit length',
+  inquiries: 'Applications in the last year',
+  mix: 'Accounts',
+}
+
+// APR points and approval points relative to a typical file. On-time payments
+// and 5–9 years of credit are the baseline, so they do not move a published average.
+const aprCreditEffect = {
+  payments: { ontime: [0, 0], late2y: [0.35, -8], late1y: [0.85, -16], serious: [1.75, -28] },
+  utilization: { under10: [-0.1, 3], under30: [0, 0], under50: [0.25, -4], over50: [0.6, -10], none: [0.15, -2] },
+  age: { under2: [0.45, -12], '2to4': [0.2, -5], '5to9': [0, 0], '10plus': [-0.15, 4] },
+  inquiries: { none: [-0.05, 2], few: [0, 0], many: [0.3, -8] },
+  mix: { both: [-0.05, 2], cards: [0, 0], thin: [0.15, -4] },
+}
+
+function approvalBase(kind, score) {
+  const bands = kind === 'mortgage'
+    ? [[760, 88], [700, 74], [660, 58], [620, 36], [0, 12]]
+    : kind === 'auto'
+      ? [[781, 92], [661, 78], [601, 52], [501, 28], [0, 14]]
+      : [[740, 84], [680, 66], [620, 40], [0, 16]]
+  return bands.find(([floor]) => score >= floor)[1]
+}
+
+function debtEffect(kind, obligations, paymentShare) {
+  if (kind === 'mortgage') {
+    if (obligations <= 0.36) return { apr: 0, approval: 6, note: 'Existing debt plus this payment is within 36% of monthly income.' }
+    if (obligations <= 0.43) return { apr: 0.25, approval: 0, note: 'Existing debt plus this payment is between 36% and 43% of monthly income. Many conventional loans use 43% as a review line.' }
+    if (obligations <= 0.5) return { apr: 0.75, approval: -12, note: 'Existing debt plus this payment is between 43% and 50% of monthly income.' }
+    return { apr: 1.5, approval: -22, note: 'Existing debt plus this payment is over 50% of monthly income.' }
+  }
+  let apr = 0
+  let approval = 0
+  const notes = []
+  if (paymentShare <= 0.1) {
+    approval += 6
+    notes.push('This payment is within 10% of monthly income.')
+  } else if (paymentShare <= 0.15) {
+    notes.push('This payment is between 10% and 15% of monthly income.')
+  } else if (paymentShare <= 0.2) {
+    apr += 0.5
+    approval -= 10
+    notes.push('This payment is between 15% and 20% of monthly income.')
+  } else {
+    apr += 1.25
+    approval -= 20
+    notes.push('This payment is over 20% of monthly income.')
+  }
+  if (obligations > 0.45) {
+    apr += 0.5
+    approval -= 10
+    notes.push('Existing debt plus this payment is over 45% of monthly income.')
+  }
+  return { apr, approval, note: notes.join(' ') }
+}
+
+function creditEffects(values) {
+  const lines = []
+  let apr = 0
+  let approval = 0
+  for (const key of Object.keys(aprCreditEffect)) {
+    const pair = aprCreditEffect[key][values[key]]
+    if (!pair) return null
+    const [aprPoints, approvalPoints] = pair
+    apr += aprPoints
+    approval += approvalPoints
+    if (aprPoints !== 0 || approvalPoints !== 0) {
+      const aprSign = aprPoints > 0 ? `+${plain(aprPoints, 2)}` : plain(aprPoints, 2)
+      const approvalSign = approvalPoints > 0 ? `+${approvalPoints}` : String(approvalPoints)
+      lines.push(`${aprFactorLabels[key]} moves the APR by ${aprSign} points and approval by ${approvalSign}.`)
+    }
+  }
+  return { apr, approval, lines }
+}
+
+function ficoBand(score) {
+  if (score >= 800) return 'Exceptional'
+  if (score >= 740) return 'Very good'
+  if (score >= 670) return 'Good'
+  if (score >= 580) return 'Fair'
+  return 'Poor'
+}
+
+function aprChoiceLabel(calc, key, value) {
+  const field = calc.fields.find((item) => item.key === key)
+  return field?.options?.find((option) => option.value === value)?.label || value
+}
+
+function rateFromPoints(points, score) {
+  const last = points[points.length - 1][0]
+  if (score < points[0][0]) return { apr: null, below: true, capped: false }
+  if (score > last) return { apr: points[points.length - 1][1], below: false, capped: true }
+  for (let i = 0; i < points.length - 1; i++) {
+    const [left, leftRate] = points[i]
+    const [right, rightRate] = points[i + 1]
+    if (score < left || score > right) continue
+    const share = right === left ? 0 : (score - left) / (right - left)
+    return { apr: leftRate + (rightRate - leftRate) * share, below: false, capped: false }
+  }
+  return { apr: points[points.length - 1][1], below: false, capped: false }
+}
+
+function rateFromBands(bands, score) {
+  const band = bands.find((item) => score >= item.low && score <= item.high)
+  if (!band) return { apr: null, below: true, capped: false, band: null }
+  return { apr: band.apr, below: false, capped: false, band }
+}
+
+function aprSchedule(product, score, lookup, shownApr) {
+  const columns = [
+    { key: 'score', label: 'Score', align: 'left' },
+    { key: 'apr', label: 'Average APR', align: 'right' },
+  ]
+  if (product.bands) {
+    return scheduleFromRows(columns, product.bands.map((band) => {
+      const yours = score >= band.low && score <= band.high
+      return {
+        score: `${band.low}–${band.high}${yours ? ' · you' : ''}`,
+        apr: percentNumber(band.apr),
+      }
+    }))
+  }
+  const rows = []
+  let placed = lookup.below || lookup.capped
+  for (const [point, apr] of product.points) {
+    if (!placed && score < point) {
+      rows.push({ score: `${score} · you`, apr: percentNumber(shownApr ?? lookup.apr) })
+      placed = true
+    }
+    const edge = lookup.capped && point === product.points[product.points.length - 1][0]
+    const yours = score === point || edge
+    rows.push({
+      score: yours ? `${edge ? `${point} and above` : point} · you` : String(point),
+      apr: percentNumber(yours && shownApr != null ? shownApr : apr),
+    })
+    if (score === point) placed = true
+  }
+  return scheduleFromRows(columns, rows)
+}
+
+function sketchScore(calc, values) {
+  const factors = ['payments', 'utilization', 'age', 'inquiries', 'mix']
+  let score = 700
+  const lines = ['Start at 700.']
+  for (const key of factors) {
+    const choice = values[key]
+    const delta = aprAdjustments[key]?.[choice]
+    if (delta === undefined) return null
+    score += delta
+    const sign = delta > 0 ? `+${delta}` : String(delta)
+    lines.push(`${aprFactorLabels[key]}: ${aprChoiceLabel(calc, key, choice)}, ${sign}.`)
+  }
+  const clamped = Math.min(850, Math.max(300, score))
+  if (clamped !== score) lines.push(`Held at ${clamped}.`)
+  lines.push('Payment history moves this sketch more than new applications, in line with the public FICO category weights. The points are fixed so the estimate can be read. They are not a bureau score.')
+  return { score: clamped, lines }
+}
+
+function computeApr(values) {
+  const calc = getCalculator('apr')
+  const { fieldErrors, numbers } = readFields(calc, values)
+  const product = aprProducts[values.product]
+  if (!product) return fail(fieldErrors, 'Choose a loan.')
+  let score
+  let sketch = null
+  if (values.source === 'history') {
+    sketch = sketchScore(calc, values)
+    if (!sketch) return fail(fieldErrors, 'Choose each part of the credit history.')
+    score = sketch.score
+  } else {
+    if (fieldErrors.score) return fail(fieldErrors)
+    score = Math.round(numbers.score)
+    if (score < 300 || score > 850) {
+      fieldErrors.score = 'Enter a score from 300 to 850'
+      return fail(fieldErrors)
+    }
+  }
+  if (Object.keys(fieldErrors).length) return fail(fieldErrors)
+
+  const effects = creditEffects(values)
+  if (!effects) return fail(fieldErrors, 'Choose each part of the credit history.')
+  const lookup = product.bands ? rateFromBands(product.bands, score) : rateFromPoints(product.points, score)
+  const rating = product.model === 'vantage' ? lookup.band?.name || '—' : ficoBand(score)
+  const amount = numbers.amount || 0
+  const debt = numbers.debt || 0
+  const income = numbers.income || 0
+  const creditApr = sketch ? 0 : effects.apr
+  const priced = lookup.apr == null ? null : Math.max(0, lookup.apr + creditApr)
+  const preview = priced != null && amount > 0 ? amortize(amount, priced, product.months, 0) : null
+  const previewPayment = preview?.ok ? preview.value.scheduled : 0
+  let debtBump = { apr: 0, approval: 0, note: '' }
+  if (income > 0 && priced != null) {
+    const obligations = (debt + previewPayment) / income
+    const paymentShare = previewPayment / income
+    debtBump = debtEffect(product.kind, obligations, paymentShare)
+  }
+  const apr = priced == null ? null : Math.max(0, priced + debtBump.apr)
+  const paid = apr != null && amount > 0 ? amortize(amount, apr, product.months, 0) : null
+  const payment = paid?.ok ? paid.value.scheduled : null
+  let approval = approvalBase(product.kind, score)
+  if (!sketch) approval += effects.approval
+  if (income > 0 && priced != null) approval += debtBump.approval
+  approval = Math.min(95, Math.max(5, Math.round(approval)))
+  const approvalTone = approval >= 70 ? 'positive' : approval < 40 ? 'negative' : undefined
+  const stats = [
+    { label: sketch ? 'Estimated score' : 'Score', value: String(score) },
+    { label: 'Rating', value: rating },
+    { label: 'Chance of approval', value: percentNumber(approval, 0), tone: approvalTone },
+  ]
+  if (payment != null) {
+    stats.push({ label: 'Sample payment', value: money(payment) })
+    stats.push({ label: 'Sample term', value: formatDuration(product.months) })
+    stats.push({ label: 'Interest', value: money(paid.value.totalInterest), tone: 'negative' })
+  }
+  const formula = [
+    'The APR starts from a published average for this score and loan. Payment history, credit length, card balances, recent applications, and the mix of accounts move that average when you enter a score. Debt and income then move it again. A score sketched from history already includes those credit factors, so they are not applied twice.',
+    'The chance of approval is a sketch for this kind of loan. It is not a lender decision, and it does not use a Social Security number or a credit report.',
+    '',
+  ]
+  if (sketch) formula.push(...sketch.lines, '')
+  formula.push(
+    `${sketch ? 'Estimated score' : 'Score'} ${score} · ${rating}`,
+    product.label,
+    product.source,
+  )
+  if (lookup.apr != null && creditApr !== 0) formula.push(`Published average ${percentNumber(lookup.apr)}. Credit factors move it by ${creditApr > 0 ? '+' : ''}${plain(creditApr, 2)} points.`, ...effects.lines)
+  if (income > 0 && priced != null) formula.push(debtBump.note)
+  else formula.push('Monthly income is 0, so debt is not part of the APR or the chance of approval.')
+  if (lookup.below) formula.push('', product.floor)
+  if (lookup.capped) formula.push('', `Scores above ${product.points[product.points.length - 1][0]} use the last published average.`)
+  formula.push(`Chance of approval = ${percentNumber(approval, 0)}`)
+  if (payment != null) {
+    formula.push('')
+    formula.push(...loanFormula(amount, apr, product.months, payment))
+  }
+
+  return {
+    ok: true,
+    result: {
+      headline: {
+        label: 'Estimated APR',
+        value: apr == null ? 'No published average' : percentNumber(apr),
+        detail: lookup.below
+          ? product.floor
+          : `${sketch ? 'Estimated score' : 'Score'} ${score} · ${rating} · ${product.label} · ${percentNumber(approval, 0)} likely`,
+        warning: lookup.capped
+          ? `Published averages stop at ${product.points[product.points.length - 1][0]}. This uses that rate.`
+          : undefined,
+      },
+      stats,
+      schedule: aprSchedule(product, score, lookup, apr),
+      formula,
+      summary: apr == null ? 'No published average' : `Estimated APR ${percentNumber(apr)}`,
+      raw: {
+        score,
+        estimated: Boolean(sketch),
+        rating,
+        apr,
+        baseApr: lookup.apr,
+        approval,
+        capped: lookup.capped,
+        below: lookup.below,
+        payment,
+        months: product.months,
+        amount,
+        debt,
+        income,
+        product: values.product,
+      },
+    },
+  }
+}
+
+const incomePay = {
+  hourly: { when: 'an hour', slice: 'Each hour', column: 'Hourly' },
+  weekly: { perYear: 52, when: 'a week', slice: 'Each week', column: 'Weekly' },
+  biweekly: { perYear: 26, when: 'every two weeks', slice: 'Each paycheck', column: 'Biweekly' },
+  monthly: { perYear: 12, when: 'a month', slice: 'Each month', column: 'Monthly' },
+  annual: { perYear: 1, when: 'a year', slice: 'Each year', column: 'Annual' },
+}
+
+function percentSchedule(income, perYear, percent, column) {
+  const marks = [10, 20, 30, 50]
+  if (!marks.includes(percent)) marks.push(percent)
+  marks.sort((a, b) => a - b)
+  const columns = [{ key: 'percent', label: 'Percent', align: 'left' }]
+  if (perYear !== 1) columns.push({ key: 'pay', label: column, align: 'right' })
+  columns.push({ key: 'year', label: 'Per year', align: 'right' })
+  return scheduleFromRows(
+    columns,
+    marks.map((mark) => {
+      const slice = income * mark / 100
+      return {
+        percent: `${Number.isInteger(mark) ? String(mark) : plain(mark, 2)}%${mark === percent ? ' · you' : ''}`,
+        pay: money(slice),
+        year: money(slice * perYear),
+      }
+    }),
+  )
+}
+
+function computePercent(values) {
+  const calc = getCalculator('percent')
+  const { fieldErrors, numbers } = readFields(calc, values)
+  const hourly = values.paid === 'hourly'
+  requirePositive(fieldErrors, numbers, 'income', 'Enter an income greater than zero')
+  if (hourly) {
+    requirePositive(fieldErrors, numbers, 'hours', 'Enter hours greater than zero')
+    requirePositive(fieldErrors, numbers, 'weeks', 'Enter weeks greater than zero')
+  }
+  if (Object.keys(fieldErrors).length || numbers.percent === undefined) return fail(fieldErrors)
+
+  const paid = incomePay[values.paid] || incomePay.annual
+  const perYear = hourly ? numbers.hours * numbers.weeks : paid.perYear
+  const slice = numbers.income * numbers.percent / 100
+  const annualShare = slice * perYear
+  const annualIncome = numbers.income * perYear
+  const percentLabel = percentNumber(numbers.percent, Number.isInteger(numbers.percent) ? 0 : 2)
+  const stats = []
+  if (hourly) {
+    stats.push(
+      { label: 'Each hour', value: money(slice) },
+      { label: 'Each week', value: money(slice * numbers.hours) },
+      { label: 'Left over each week', value: money((numbers.income - slice) * numbers.hours) },
+    )
+  } else if (perYear !== 1) stats.push({ label: paid.slice, value: money(slice) })
+  else stats.push({ label: 'Each month', value: money(annualShare / 12) })
+  if (!hourly) stats.push({ label: perYear === 1 ? 'Left over' : 'Left over this pay', value: money(numbers.income - slice) })
+  stats.push({ label: 'Left over a year', value: money(annualIncome - annualShare) })
+  const formula = hourly
+    ? [
+        'Share = hourly rate × percent / 100',
+        'Annual total = share × hours per week × weeks per year',
+        '',
+        `hourly rate = ${money(numbers.income)}`,
+        `percent = ${percentLabel}`,
+        `share = ${money(slice)} an hour`,
+        `hours per week = ${plain(numbers.hours, Number.isInteger(numbers.hours) ? 0 : 2)}`,
+        `weeks per year = ${plain(numbers.weeks, Number.isInteger(numbers.weeks) ? 0 : 2)}`,
+        `annual total = ${money(annualShare)}`,
+      ]
+    : [
+        'Share = income × percent / 100',
+        'Annual total = share × paychecks in a year',
+        'Weekly uses 52, biweekly uses 26, monthly uses 12, and annual uses 1.',
+        '',
+        `income = ${money(numbers.income)} ${paid.when}`,
+        `percent = ${percentLabel}`,
+        `share = ${money(slice)}`,
+        `paychecks = ${perYear}`,
+        `annual total = ${money(annualShare)}`,
+      ]
+  return {
+    ok: true,
+    result: {
+      headline: {
+        label: 'Annual total',
+        value: money(annualShare),
+        detail: `${percentLabel} of ${money(numbers.income)} ${paid.when}`,
+      },
+      stats,
+      schedule: percentSchedule(numbers.income, perYear, numbers.percent, paid.column),
+      formula,
+      summary: `${percentLabel} totals ${money(annualShare)} a year`,
+      raw: {
+        percent: numbers.percent,
+        perYear,
+        paycheckShare: slice,
+        annualIncome,
+        annualShare,
+        remaining: numbers.income - slice,
+        remainingAnnual: annualIncome - annualShare,
+        ...(hourly ? { hours: numbers.hours, weeks: numbers.weeks, weeklyShare: slice * numbers.hours } : {}),
+      },
+    },
+  }
 }
 
 function computeCalc(values) {

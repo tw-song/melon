@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { getCalculator, setExchangeRates, setProgramContext } from './calculators.js'
+import { blankInputs, calculators, getCalculator, setExchangeRates, setProgramContext } from './calculators.js'
 import { TAX_STATE_CODES, figureTaxes } from './taxes.js'
 import { formatDuration, parseLooseNumber } from './format.js'
 
@@ -163,10 +163,64 @@ test('mortgage separates housing costs from the loan', () => {
   })
   assert.equal(result.ok, true)
   assert.equal(result.result.raw.loanAmount, 360000)
+  assert.equal(result.result.raw.fundingFee, 0)
   assert.ok(result.result.raw.monthlyHousing > result.result.raw.monthlyPayment)
   const rejected = run('mortgage', { down: '500000' })
   assert.equal(rejected.ok, false)
   assert.ok(rejected.fieldErrors.down)
+})
+
+test('VA loan uses the purchase funding fee', () => {
+  const common = {
+    loanType: 'va',
+    price: '200000',
+    annualRate: '0',
+    years: '30',
+    months: '0',
+    days: '0',
+    tax: '0',
+    insurance: '0',
+    hoa: '0',
+    extra: '0',
+  }
+  const first = run('mortgage', { ...common, vaUse: 'first', vaFeeMode: 'rolled', down: '0' })
+  assert.equal(first.ok, true)
+  assert.equal(first.result.raw.fundingFeeRate, 0.0215)
+  assert.equal(first.result.raw.fundingFee, 4300)
+  assert.equal(first.result.raw.baseLoan, 200000)
+  assert.equal(first.result.raw.loanAmount, 204300)
+  assert.ok(Math.abs(first.result.raw.monthlyPayment - 204300 / 360) < 0.001)
+  assert.ok(Math.abs(first.result.raw.suggestedPayment - 204300 / 180) < 0.01)
+  assert.match(first.result.formula.join('\n'), /2\.15%/)
+  assert.match(first.result.formula.join('\n'), /no monthly mortgage insurance/)
+
+  const five = run('mortgage', { ...common, vaUse: 'first', vaFeeMode: 'rolled', down: '10000' })
+  assert.equal(five.result.raw.fundingFee, 2850)
+  assert.equal(five.result.raw.loanAmount, 192850)
+
+  const justUnderFive = run('mortgage', { ...common, vaUse: 'first', vaFeeMode: 'rolled', down: '9999' })
+  assert.equal(justUnderFive.result.raw.fundingFeeRate, 0.0215)
+
+  const ten = run('mortgage', { ...common, vaUse: 'first', vaFeeMode: 'rolled', down: '20000' })
+  assert.equal(ten.result.raw.fundingFee, 2250)
+  assert.equal(ten.result.raw.fundingFeeRate, 0.0125)
+
+  const again = run('mortgage', { ...common, vaUse: 'subsequent', vaFeeMode: 'rolled', down: '0' })
+  assert.equal(again.result.raw.fundingFee, 6600)
+  assert.equal(again.result.raw.loanAmount, 206600)
+
+  const againFive = run('mortgage', { ...common, vaUse: 'subsequent', vaFeeMode: 'rolled', down: '10000' })
+  assert.equal(againFive.result.raw.fundingFeeRate, 0.015)
+
+  const exempt = run('mortgage', { ...common, vaUse: 'exempt', down: '0' })
+  assert.equal(exempt.result.raw.fundingFee, 0)
+  assert.equal(exempt.result.raw.loanAmount, 200000)
+
+  const upfront = run('mortgage', { ...common, vaUse: 'first', vaFeeMode: 'upfront', down: '0' })
+  assert.equal(upfront.result.raw.fundingFee, 4300)
+  assert.equal(upfront.result.raw.loanAmount, 200000)
+  assert.equal(upfront.result.raw.dueAtClosing, 4300)
+  assert.match(upfront.result.stats.map((stat) => stat.label).join('\n'), /Due at closing/)
 })
 
 test('savings goal solves both time and payment', () => {
@@ -571,6 +625,16 @@ test('sales tax uses the selected state rate and an optional local rate', () => 
   })
   assert.equal(blank.ok, false)
   assert.equal(blank.fieldErrors['item-0-price'], 'Enter a number')
+
+  const unused = run('salestax', {
+    entry: 'list',
+    state: 'OR',
+    local: '0',
+    items: JSON.stringify([{ comment: '', price: '', quantity: '' }]),
+  })
+  assert.equal(unused.ok, true)
+  assert.equal(unused.fieldErrors, undefined)
+  assert.equal(unused.result.raw.total, 0)
 })
 
 test('credit card payoff counts months until the balance is gone', () => {
@@ -819,6 +883,22 @@ test('subscriptions price the catalog and copy into debt, pay, and savings', () 
   assert.equal(custom.result.raw.monthly, 5)
   assert.equal(custom.result.raw.count, 1)
 
+  const edited = run('subscriptions', {
+    services: JSON.stringify([
+      { service: 'youtube', name: '', price: '10', comment: 'Shared plan' },
+      { service: 'spotify', name: '', price: '', comment: '' },
+    ]),
+  })
+  assert.equal(edited.result.raw.monthly, 23)
+  assert.equal(edited.result.schedule.rows[0].note, 'Shared plan')
+  assert.equal(edited.result.schedule.rows[0].monthly, '$10.00')
+  assert.equal(edited.result.schedule.rows[1].monthly, '$13.00')
+
+  const noted = run('subscriptions', {
+    services: JSON.stringify([{ service: 'custom', name: 'News', price: '4', comment: 'Weekend paper' }]),
+  })
+  assert.equal(noted.result.schedule.rows[0].note, 'Weekend paper')
+
   setProgramContext(null)
   const untouched = run('dti', { housingSource: 'amount', subscriptionSource: 'auto' })
   assert.equal(untouched.result.raw.subscriptions, 0)
@@ -851,6 +931,57 @@ test('subscriptions price the catalog and copy into debt, pay, and savings', () 
   assert.equal(saved.result.stats.some((stat) => stat.label === 'Subscriptions'), true)
   setProgramContext(null)
   assert.equal(run('savings').result.stats.some((stat) => stat.label === 'Subscriptions'), false)
+})
+
+test('pay rate converts a salary into hourly, daily, weekly, and monthly pay', () => {
+  const salary = run('payrate')
+  assert.equal(salary.ok, true)
+  assert.ok(Math.abs(salary.result.raw.hourly - 80000 / 2080) < 1e-9)
+  assert.ok(Math.abs(salary.result.raw.daily - 80000 / 2080 * 8) < 1e-9)
+  assert.ok(Math.abs(salary.result.raw.weekly - 80000 / 52) < 1e-9)
+  assert.ok(Math.abs(salary.result.raw.monthly - 80000 / 12) < 1e-9)
+  assert.equal(salary.result.raw.hoursPerYear, 2080)
+  assert.equal(salary.result.raw.workdays, 260)
+  assert.ok(Math.abs(salary.result.raw.timeAndHalf - salary.result.raw.hourly * 1.5) < 1e-9)
+  assert.equal(salary.result.headline.value, '$38.46')
+  assert.equal(salary.result.raw.fullTimeHourly, salary.result.raw.hourly)
+  assert.equal(salary.result.raw.raisedAnnual, null)
+
+  const hourly = run('payrate', { mode: 'hourly', rate: '25', hoursPerDay: '8', daysPerWeek: '5', weeks: '52' })
+  assert.equal(hourly.result.raw.annual, 52000)
+  assert.equal(hourly.result.raw.daily, 200)
+  assert.equal(hourly.result.raw.weekly, 1000)
+  assert.equal(hourly.result.headline.label, 'Annual salary')
+
+  const daily = run('payrate', { mode: 'daily', daily: '200', hoursPerDay: '8', daysPerWeek: '5', weeks: '52' })
+  assert.equal(daily.result.raw.hourly, 25)
+  assert.equal(daily.result.raw.annual, 52000)
+
+  const weekly = run('payrate', { mode: 'weekly', weekly: '1000', hoursPerDay: '8', daysPerWeek: '5', weeks: '52' })
+  assert.equal(weekly.result.raw.hourly, 25)
+  assert.equal(weekly.result.raw.daily, 200)
+
+  const monthly = run('payrate', { mode: 'monthly', monthly: '5000', hoursPerDay: '8', daysPerWeek: '5', weeks: '52' })
+  assert.equal(monthly.result.raw.annual, 60000)
+  assert.ok(Math.abs(monthly.result.raw.hourly - 60000 / 2080) < 1e-9)
+
+  const shorterYear = run('payrate', { mode: 'salary', salary: '80000', hoursPerDay: '8', daysPerWeek: '5', weeks: '50' })
+  assert.equal(shorterYear.result.raw.hoursPerYear, 2000)
+  assert.equal(shorterYear.result.raw.hourly, 40)
+  assert.equal(shorterYear.result.raw.weekly, 1600)
+  assert.ok(Math.abs(shorterYear.result.raw.monthly - 80000 / 12) < 1e-9)
+  assert.ok(Math.abs(shorterYear.result.raw.fullTimeHourly - 80000 / 2080) < 1e-9)
+  assert.match(shorterYear.result.formula.join('\n'), /2,080-hour year/)
+
+  const raised = run('payrate', { raise: '10' })
+  assert.equal(raised.result.raw.raisedAnnual, 88000)
+  assert.ok(Math.abs(raised.result.raw.raisedHourly - 88000 / 2080) < 1e-9)
+  assert.equal(raised.result.schedule.columns.some((column) => column.key === 'raised'), true)
+  assert.equal(raised.result.schedule.rows.at(-1).raised, '$88,000.00')
+
+  assert.equal(run('payrate', { salary: '' }).ok, false)
+  assert.equal(run('payrate', { hoursPerDay: '0' }).ok, false)
+  assert.equal(run('payrate', { hoursPerDay: '24', daysPerWeek: '7', weeks: '1' }).result.raw.hoursPerYear, 168)
 })
 
 test('wage converts hourly and salary into the same gross periods', () => {
@@ -933,6 +1064,96 @@ test('wage and overtime estimate 2026 taxes and accept filled-in deductions', ()
   const week = run('overtime', { state: 'TX', rate: '25', entry: 'week', hours: '40', taxes: 'estimate', filing: 'single' })
   assert.equal(week.result.raw.total, 1000)
   assert.ok(Math.abs(week.result.raw.takeHome - (43962 / 52)) < 0.02)
+  assert.match(california.result.stats.find((stat) => stat.label === 'Social Security').value, /6\.20%/)
+})
+
+test('paystub dollars and percents convert both ways for wage and overtime', () => {
+  const dollars = run('wage', {
+    mode: 'salary',
+    salary: '52000',
+    taxes: 'custom',
+    stubEntry: 'amount',
+    stubPeriod: 'annual',
+    stubGross: '0',
+    social: '3224',
+    medicare: '754',
+    federal: '4060',
+    retirementAmount: '2600',
+  })
+  assert.equal(dollars.ok, true)
+  assert.ok(Math.abs(dollars.result.raw.socialRate - 3224 / 52000) < 1e-9)
+  assert.ok(Math.abs(dollars.result.raw.retirementRate - 0.05) < 1e-9)
+  assert.match(dollars.result.stats.find((stat) => stat.label === '401(k)').value, /\$2,600\.00 · 5%/)
+
+  const percents = run('wage', {
+    mode: 'salary',
+    salary: '52000',
+    taxes: 'custom',
+    stubEntry: 'percent',
+    socialRate: '6.2',
+    medicareRate: '1.45',
+    federalRate: '10',
+    retirementRate: '5',
+  })
+  assert.ok(Math.abs(percents.result.raw.social - 3224) < 0.01)
+  assert.ok(Math.abs(percents.result.raw.medicare - 754) < 0.01)
+  assert.equal(percents.result.raw.federal, 5200)
+  assert.equal(percents.result.raw.traditional, 2600)
+  assert.equal(percents.result.raw.takeHome, 52000 - 3224 - 754 - 5200 - 2600)
+
+  const stub = run('wage', {
+    mode: 'salary',
+    salary: '52000',
+    taxes: 'custom',
+    stubGross: '2000',
+    social: '124',
+    federal: '200',
+    retirementAmount: '100',
+  })
+  assert.ok(Math.abs(stub.result.raw.social - 3224) < 0.01)
+  assert.equal(stub.result.raw.federal, 5200)
+  assert.equal(stub.result.raw.traditional, 2600)
+  assert.match(stub.result.formula.join('\n'), /paystub gross/)
+
+  const biweekly = run('wage', {
+    mode: 'salary',
+    salary: '52000',
+    taxes: 'custom',
+    stubPeriod: 'biweekly',
+    social: '124',
+  })
+  assert.ok(Math.abs(biweekly.result.raw.social - 3224) < 0.01)
+
+  const overtime = run('overtime', {
+    state: 'TX',
+    rate: '25',
+    entry: 'week',
+    hours: '40',
+    taxes: 'custom',
+    stubEntry: 'percent',
+    socialRate: '6.2',
+    federalRate: '10',
+    retirementRate: '5',
+  })
+  assert.equal(overtime.result.raw.total, 1000)
+  assert.ok(Math.abs(overtime.result.raw.social - 62) < 0.01)
+  assert.equal(overtime.result.raw.federal, 100)
+  assert.equal(overtime.result.raw.traditional, 50)
+  assert.ok(Math.abs(overtime.result.raw.takeHome - 788) < 0.01)
+
+  const weeklyStub = run('overtime', {
+    state: 'TX',
+    rate: '25',
+    entry: 'week',
+    hours: '40',
+    taxes: 'custom',
+    stubPeriod: 'weekly',
+    social: '62',
+    retirementAmount: '50',
+  })
+  assert.ok(Math.abs(weeklyStub.result.raw.social - 62) < 0.01)
+  assert.ok(Math.abs(weeklyStub.result.raw.socialRate - 0.062) < 1e-9)
+  assert.equal(weeklyStub.result.raw.traditional, 50)
 })
 
 test('overtime follows each state rule', () => {
@@ -1059,6 +1280,206 @@ test('scientific calculator handles trig, powers, roots, and factorials', () => 
   assert.equal(run('scientific').ok, true)
 })
 
+test('APR estimate uses published score tables and never needs a Social Security number', () => {
+  const calc = getCalculator('apr')
+  assert.equal(calc.group, 'Credit')
+  assert.equal(JSON.stringify(calc).includes('Social Security'), true)
+  assert.equal(calc.fields.some((field) => /ssn|social/i.test(`${field.key} ${field.label}`)), false)
+
+  const mortgage = run('apr')
+  assert.equal(mortgage.ok, true)
+  assert.equal(mortgage.result.raw.score, 720)
+  assert.equal(mortgage.result.raw.rating, 'Good')
+  assert.equal(mortgage.result.raw.apr, 7.74)
+  assert.equal(mortgage.result.headline.value, '7.74%')
+  assert.equal(mortgage.result.raw.approval, 74)
+  const r = 7.74 / 100 / 12
+  const growth = (1 + r) ** 360
+  const expected = 350000 * r * growth / (growth - 1)
+  assert.ok(Math.abs(mortgage.result.raw.payment - expected) < 0.01)
+  assert.equal(mortgage.result.schedule.rows.find((row) => row.score.includes('720')).score, '720 · you')
+
+  const between = run('apr', { score: '630' })
+  assert.ok(Math.abs(between.result.raw.apr - 8.1) < 1e-9)
+  assert.equal(between.result.headline.value, '8.10%')
+  assert.equal(between.result.schedule.rows.some((row) => row.score === '630 · you'), true)
+
+  assert.equal(run('apr', { score: '850', product: 'mortgage15' }).result.raw.apr, 6.84)
+  const below = run('apr', { score: '600' })
+  assert.equal(below.ok, true)
+  assert.equal(below.result.raw.apr, null)
+  assert.equal(below.result.raw.below, true)
+  assert.match(below.result.headline.detail, /620/)
+
+  assert.equal(run('apr', { score: '800', product: 'autonew', amount: '35000' }).result.raw.apr, 4.41)
+  assert.equal(run('apr', { score: '780', product: 'autonew' }).result.raw.apr, 6.15)
+  assert.equal(run('apr', { score: '500', product: 'autoused' }).result.raw.apr, 21.62)
+  assert.equal(run('apr', { score: '501', product: 'autoused' }).result.raw.rating, 'Subprime')
+
+  assert.equal(run('apr', { score: '740', product: 'personal36' }).result.raw.apr, 10.82)
+  const above = run('apr', { score: '800', product: 'personal60', amount: '' })
+  assert.equal(above.result.raw.apr, 11.69)
+  assert.equal(above.result.raw.capped, true)
+  assert.equal(above.result.raw.payment, null)
+  assert.match(above.result.headline.warning, /740/)
+  assert.equal(run('apr', { score: '610', product: 'personal36' }).result.raw.below, true)
+
+  const history = run('apr', {
+    source: 'history',
+    payments: 'ontime',
+    utilization: 'under10',
+    age: '10plus',
+    inquiries: 'none',
+    mix: 'both',
+    product: 'personal36',
+    amount: '10000',
+  })
+  assert.equal(history.result.raw.estimated, true)
+  assert.equal(history.result.raw.score, 830)
+  assert.equal(history.result.raw.rating, 'Exceptional')
+  assert.equal(history.result.raw.apr, 10.82)
+  assert.match(history.result.formula.join('\n'), /not a bureau score/)
+
+  const weak = run('apr', {
+    source: 'history',
+    payments: 'serious',
+    utilization: 'over50',
+    age: 'under2',
+    inquiries: 'many',
+    mix: 'thin',
+    product: 'autonew',
+  })
+  assert.equal(weak.result.raw.score, 400)
+  assert.equal(weak.result.raw.apr, 16.11)
+
+  const stressed = run('apr', { score: '720', payments: 'serious', age: 'under2', income: '0', debt: '0' })
+  assert.ok(Math.abs(stressed.result.raw.apr - (7.74 + 1.75 + 0.45)) < 1e-9)
+  assert.equal(stressed.result.raw.approval, 34)
+  assert.match(stressed.result.formula.join('\n'), /Payment history/)
+
+  const comfortable = run('apr', { score: '720', income: '12000', debt: '0', amount: '350000' })
+  assert.equal(comfortable.result.raw.apr, 7.74)
+  assert.equal(comfortable.result.raw.approval, 80)
+
+  const heavyDebt = run('apr', { score: '720', income: '6000', debt: '2000', amount: '350000' })
+  assert.ok(Math.abs(heavyDebt.result.raw.apr - 9.24) < 0.02)
+  assert.equal(heavyDebt.result.raw.approval, 52)
+
+  const newCar = run('apr', { score: '800', product: 'autonew', amount: '20000', income: '8000', debt: '0' })
+  assert.equal(newCar.result.raw.apr, 4.41)
+  assert.equal(newCar.result.raw.approval, 95)
+
+  assert.equal(run('apr', { score: '200' }).ok, false)
+  assert.match(run('apr', { score: '' }).fieldErrors.score, /number/i)
+})
+
+test('percentage totals a share of hourly, weekly, biweekly, monthly, or annual income', () => {
+  const annual = run('percent')
+  assert.equal(annual.ok, true)
+  assert.equal(annual.result.raw.percent, 20)
+  assert.equal(annual.result.raw.perYear, 1)
+  assert.equal(annual.result.raw.annualShare, 16000)
+  assert.equal(annual.result.raw.remaining, 64000)
+  assert.equal(annual.result.headline.label, 'Annual total')
+  assert.equal(annual.result.headline.value, '$16,000.00')
+  assert.equal(annual.result.schedule.rows.find((row) => row.percent.includes('20')).percent, '20% · you')
+  assert.equal(annual.result.schedule.columns.some((column) => column.key === 'pay'), false)
+
+  const monthly = run('percent', { income: '6000', paid: 'monthly', percent: '30' })
+  assert.equal(monthly.result.raw.paycheckShare, 1800)
+  assert.equal(monthly.result.raw.annualShare, 21600)
+  assert.equal(monthly.result.headline.value, '$21,600.00')
+  assert.equal(monthly.result.schedule.rows.find((row) => row.percent.includes('30')).pay, '$1,800.00')
+
+  const weekly = run('percent', { income: '1000', paid: 'weekly', percent: '10' })
+  assert.equal(weekly.result.raw.paycheckShare, 100)
+  assert.equal(weekly.result.raw.annualShare, 5200)
+  assert.equal(weekly.result.raw.perYear, 52)
+
+  const biweekly = run('percent', { income: '2000', paid: 'biweekly', percent: '10' })
+  assert.equal(biweekly.result.raw.paycheckShare, 200)
+  assert.equal(biweekly.result.raw.annualShare, 5200)
+  assert.equal(biweekly.result.raw.perYear, 26)
+
+  const hourly = run('percent', { income: '25', paid: 'hourly', hours: '40', weeks: '52', percent: '20' })
+  assert.equal(hourly.result.raw.paycheckShare, 5)
+  assert.equal(hourly.result.raw.weeklyShare, 200)
+  assert.equal(hourly.result.raw.annualShare, 10400)
+  assert.equal(hourly.result.raw.perYear, 2080)
+  assert.equal(hourly.result.headline.value, '$10,400.00')
+  assert.equal(hourly.result.headline.detail, '20% of $25.00 an hour')
+  assert.equal(hourly.result.schedule.rows.find((row) => row.percent.includes('20')).pay, '$5.00')
+  assert.equal(hourly.result.schedule.columns.some((column) => column.label === 'Hourly'), true)
+
+  const shortYear = run('percent', { income: '25', paid: 'hourly', hours: '20', weeks: '26', percent: '10' })
+  assert.equal(shortYear.result.raw.paycheckShare, 2.5)
+  assert.equal(shortYear.result.raw.weeklyShare, 50)
+  assert.equal(shortYear.result.raw.annualShare, 1300)
+
+  assert.equal(run('percent', { paid: 'hourly', hours: '0' }).ok, false)
+  assert.match(run('percent', { paid: 'hourly', hours: '' }).fieldErrors.hours, /number/i)
+
+  const none = run('percent', { percent: '0' })
+  assert.equal(none.ok, true)
+  assert.equal(none.result.raw.annualShare, 0)
+  assert.equal(none.result.raw.remaining, 80000)
+
+  const empty = run('percent', { income: '' })
+  assert.equal(empty.ok, false)
+  assert.match(empty.fieldErrors.income, /number/i)
+})
+
+test('blank inputs clear amounts in every category', () => {
+  const inputs = blankInputs()
+  assert.equal(Object.keys(inputs).length, calculators.length)
+  for (const calc of calculators) {
+    const values = inputs[calc.id]
+    for (const field of calc.fields) {
+      if (field.kind === 'number' || field.kind === 'slider' || field.kind === 'text' || field.kind === 'keypad') {
+        assert.equal(values[field.key], '', `${calc.id}.${field.key}`)
+      }
+      if (field.kind === 'span') {
+        for (const part of field.parts) assert.equal(values[part.key], '', `${calc.id}.${part.key}`)
+      }
+      if (field.kind === 'segment' || field.kind === 'select' || field.kind === 'combo') {
+        assert.equal(values[field.key], calc.defaults[field.key], `${calc.id}.${field.key}`)
+      }
+    }
+  }
+  const cards = JSON.parse(inputs.creditcard.cards)
+  assert.equal(cards[0].balance, '')
+  assert.equal(cards[0].apr, '')
+  assert.equal(cards[0].minimum, '')
+  const items = JSON.parse(inputs.salestax.items)
+  assert.equal(items[0].price, '')
+  assert.equal(items[0].quantity, '')
+  assert.equal(inputs.wage.mode, 'hourly')
+  assert.equal(inputs.mortgage.price, '')
+})
+
+test('diminishing balance applies a fixed rate to the capital left', () => {
+  const five = run('diminish', { cost: '30000', rate: '20', years: '5', months: '0', days: '0', salvage: '0' })
+  assert.equal(five.ok, true)
+  assert.ok(Math.abs(five.result.raw.remaining - 30000 * 0.8 ** 5) < 0.01)
+  assert.equal(five.result.schedule.rows.length, 5)
+  assert.equal(five.result.schedule.rows[0].depreciation, '$6,000.00')
+  assert.equal(five.result.schedule.rows[0].closing, '$24,000.00')
+  assert.equal(five.result.schedule.rows[4].closing, '$9,830.40')
+
+  const floor = run('diminish', { cost: '30000', rate: '20', years: '5', salvage: '10000' })
+  assert.equal(floor.ok, true)
+  assert.ok(Math.abs(floor.result.raw.remaining - 10000) < 0.01)
+  assert.equal(floor.result.schedule.rows[4].closing, '$10,000.00')
+
+  const partial = run('diminish', { cost: '30000', rate: '20', years: '2', months: '6', days: '0', salvage: '0' })
+  assert.equal(partial.ok, true)
+  assert.ok(Math.abs(partial.result.raw.remaining - 30000 * 0.8 ** 2.5) < 0.01)
+  assert.equal(partial.result.schedule.rows[2].period, '6 months')
+
+  const tooHigh = run('diminish', { cost: '30000', rate: '20', years: '5', salvage: '40000' })
+  assert.match(tooHigh.fieldErrors.salvage, /cannot be more/)
+})
+
 test('default scenarios all calculate', () => {
   setExchangeRates({
     status: 'ready',
@@ -1073,7 +1494,7 @@ test('default scenarios all calculate', () => {
     fetchedAt: Date.now(),
   })
   setProgramContext(null)
-  for (const id of ['compound', 'return', 'loan', 'carloan', 'carlease', 'mortgage', 'creditcard', 'dti', 'refinance', 'rent', 'salestax', 'subscriptions', 'savings', 'retirement', 'networth', 'exchange', 'wage', 'overtime', 'scientific', 'calc']) {
+  for (const id of ['compound', 'return', 'loan', 'carloan', 'carlease', 'mortgage', 'creditcard', 'dti', 'refinance', 'rent', 'apr', 'salestax', 'subscriptions', 'savings', 'retirement', 'percent', 'diminish', 'networth', 'exchange', 'wage', 'payrate', 'overtime', 'scientific', 'calc']) {
     const result = run(id)
     assert.equal(result.ok, true, id)
     assert.ok(result.result.headline.value)

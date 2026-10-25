@@ -1,4 +1,4 @@
-import { parseLines, parseSaleItems, visibleFields } from './calculators.js'
+import { fieldsForReport, parseLines, parseSaleItems } from './calculators.js'
 import { displayRaw, lineIsBlank, optionLabel, shownNumber, spanText } from './fields.js'
 
 function numericCell(field, raw) {
@@ -22,7 +22,7 @@ function textCell(value) {
 }
 
 function fieldValue(field, values) {
-  if (field.kind === 'number') return numericCell(field, displayRaw(field, values))
+  if (field.kind === 'number' || field.kind === 'slider') return numericCell(field, displayRaw(field, values))
   if (field.kind === 'segment' || field.kind === 'select' || field.kind === 'combo') return optionLabel(field, values[field.key])
   if (field.kind === 'keypad' || field.kind === 'text') return String(values[field.key] || '').trim()
   if (field.kind === 'span') return spanText(field, values)
@@ -50,16 +50,30 @@ function pushTable(rows, columns, body) {
   }
 }
 
-export function sheetsForEntries(entries) {
+function workbookOptions(options = {}) {
+  return {
+    inputs: options.inputs !== false,
+    result: options.result !== false,
+    schedule: options.schedule !== false,
+    formula: options.formula !== false,
+    enteredOnly: options.enteredOnly === true,
+  }
+}
+
+export function sheetsForEntries(entries, options) {
+  const chosen = workbookOptions(options)
   return entries.map((entry) => {
     const rows = [
       [{ v: entry.calc.name, bold: true }],
       ['Group', entry.calc.group],
       ['Saved', savedWhen(entry.savedAt)],
-      [],
-      [{ v: 'Inputs', bold: true }],
     ]
-    const fields = visibleFields(entry.calc, entry.values)
+    const fields = chosen.inputs ? fieldsForReport(entry.calc, entry.values, chosen.enteredOnly) : []
+    if (chosen.inputs) {
+      rows.push([])
+      rows.push([{ v: 'Inputs', bold: true }])
+      if (!fields.length) rows.push(['No entered inputs.'])
+    }
     const scalar = fields.filter((field) => field.kind !== 'lines' && field.kind !== 'items')
     if (scalar.length) {
       rows.push([{ v: 'Field', bold: true }, { v: 'Value', bold: true }])
@@ -80,9 +94,10 @@ export function sheetsForEntries(entries) {
           body.map((row) => {
             const next = {}
             for (const column of field.columns) {
+              const shown = typeof column.value === 'function' ? column.value(row, entry.values) : row[column.key]
               if (column.type === 'select') next[column.key] = optionLabel(column, row[column.key])
-              else if (column.type === 'number') next[column.key] = numericCell(column, row[column.key])
-              else next[column.key] = String(row[column.key] ?? '').trim()
+              else if (column.type === 'number') next[column.key] = numericCell(column, shown)
+              else next[column.key] = String(shown ?? '').trim()
             }
             return next
           }),
@@ -109,29 +124,34 @@ export function sheetsForEntries(entries) {
       }
     }
 
-    rows.push([])
-    rows.push([{ v: 'Result', bold: true }])
     const outcome = entry.outcome
+    const includeResult = chosen.result || chosen.schedule || chosen.formula
+    if (includeResult) {
+      rows.push([])
+      rows.push([{ v: 'Result', bold: true }])
+    }
     if (!outcome?.ok) {
-      rows.push([outcome?.formError || 'This calculation could not be completed.'])
+      if (chosen.result) rows.push([outcome?.formError || 'This calculation could not be completed.'])
       return { name: entry.calc.name, rows }
     }
     const { headline, stats, schedule, formula } = outcome.result
-    rows.push([headline.label, textCell(headline.value)])
-    if (headline.detail) rows.push([headline.detail])
-    if (headline.warning) rows.push([headline.warning])
-    if (stats?.length) {
-      rows.push([])
-      rows.push([{ v: 'Outputs', bold: true }])
-      rows.push([{ v: 'Label', bold: true }, { v: 'Value', bold: true }])
-      for (const stat of stats) rows.push([stat.label, textCell(stat.value)])
+    if (chosen.result) {
+      rows.push([headline.label, textCell(headline.value)])
+      if (headline.detail) rows.push([headline.detail])
+      if (headline.warning) rows.push([headline.warning])
+      if (stats?.length) {
+        rows.push([])
+        rows.push([{ v: 'Outputs', bold: true }])
+        rows.push([{ v: 'Label', bold: true }, { v: 'Value', bold: true }])
+        for (const stat of stats) rows.push([stat.label, textCell(stat.value)])
+      }
     }
-    if (schedule?.rows?.length) {
+    if (chosen.schedule && schedule?.rows?.length) {
       rows.push([])
       rows.push([{ v: 'Schedule', bold: true }])
       pushTable(rows, schedule.columns, schedule.rows)
     }
-    if (Array.isArray(formula) && formula.length) {
+    if (chosen.formula && Array.isArray(formula) && formula.length) {
       rows.push([])
       rows.push([{ v: 'Formula', bold: true }])
       for (const line of formula) rows.push([line])

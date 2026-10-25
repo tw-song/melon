@@ -2,6 +2,57 @@ import Cocoa
 import WebKit
 import UniformTypeIdentifiers
 
+private enum SnapSide {
+    case left, right, full
+}
+
+private final class TileHighlightView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+    }
+
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 14, yRadius: 14)
+        NSColor(calibratedWhite: 1, alpha: 0.28).setFill()
+        path.fill()
+        NSColor(calibratedWhite: 1, alpha: 0.62).setStroke()
+        path.lineWidth = 2
+        path.stroke()
+    }
+}
+
+private final class TileHighlightPanel: NSPanel {
+    init() {
+        super.init(
+            contentRect: .zero,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        isFloatingPanel = true
+        isReleasedWhenClosed = false
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        ignoresMouseEvents = true
+        hidesOnDeactivate = false
+        level = .normal
+        collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        contentView = TileHighlightView()
+    }
+
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
 enum LaunchError: LocalizedError {
     case missingFiles
     case pythonMissing
@@ -32,6 +83,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var dragHoles: [NSRect] = []
     private var dragStartMouse: NSPoint?
     private var dragStartOrigin: NSPoint?
+    private var dragStartFrame = NSRect.zero
+    private var dragGrabFraction: CGFloat = 0.5
+    private var dragGrabFromTop: CGFloat = 12
+    private var preSnapFrame: NSRect?
+    private var snapSide: SnapSide?
+    private var snappedScreenFrame: NSRect?
+    private var previewSide: SnapSide?
+    private var previewScreenFrame: NSRect?
+    private var tileHighlight: TileHighlightPanel?
+    private let normalMinSize = NSSize(width: 880, height: 600)
+    private let pointerSnapMargin: CGFloat = 12
+    private let pointerHoldMargin: CGFloat = 36
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenu()
@@ -263,6 +326,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         web.allowsBackForwardNavigationGestures = false
         web.underPageBackgroundColor = dark
         web.setValue(false, forKey: "drawsBackground")
+        web.autoresizingMask = [.width, .height]
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1200, height: 780),
@@ -275,7 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         window.titleVisibility = .hidden
         window.backgroundColor = dark
         window.appearance = NSAppearance(named: .darkAqua)
-        window.minSize = NSSize(width: 880, height: 600)
+        window.minSize = normalMinSize
         window.contentView = web
         window.center()
         window.setFrameAutosaveName("MelonWindow")
@@ -296,22 +360,232 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             switch event.type {
             case .leftMouseDown:
                 guard self.pointInTitlebar(event) else { return event }
-                self.dragStartMouse = NSEvent.mouseLocation
+                let mouse = NSEvent.mouseLocation
+                window.setFrame(window.frame, display: false)
+                self.dragStartMouse = mouse
                 self.dragStartOrigin = window.frame.origin
+                self.dragStartFrame = window.frame
+                let width = max(window.frame.width, 1)
+                self.dragGrabFraction = (mouse.x - window.frame.minX) / width
+                self.dragGrabFromTop = window.frame.maxY - mouse.y
                 return nil
             case .leftMouseDragged:
                 guard let start = self.dragStartMouse, let origin = self.dragStartOrigin else { return event }
                 let now = NSEvent.mouseLocation
-                window.setFrameOrigin(NSPoint(x: origin.x + now.x - start.x, y: origin.y + now.y - start.y))
+                if self.snapSide != nil {
+                    let moved = hypot(now.x - start.x, now.y - start.y)
+                    if moved < 4 { return nil }
+                    self.liftOutOfTile(at: now)
+                } else {
+                    window.setFrameOrigin(NSPoint(x: origin.x + now.x - start.x, y: origin.y + now.y - start.y))
+                }
+                self.updatePreview(at: now)
                 return nil
             case .leftMouseUp:
                 let dragging = self.dragStartMouse != nil
+                if dragging, let side = self.previewSide, let screen = self.screen(matching: self.previewScreenFrame) {
+                    self.commitTile(side, on: screen)
+                } else if dragging, self.snapSide == nil {
+                    self.preSnapFrame = nil
+                    self.hidePreview()
+                }
                 self.dragStartMouse = nil
                 self.dragStartOrigin = nil
                 return dragging ? nil : event
             default:
                 return event
             }
+        }
+    }
+
+    private func screen(at point: NSPoint) -> NSScreen? {
+        if let match = NSScreen.screens.first(where: { NSMouseInRect(point, $0.frame, false) }) {
+            return match
+        }
+        return NSScreen.screens.min { lhs, rhs in
+            hypot(lhs.frame.midX - point.x, lhs.frame.midY - point.y) < hypot(rhs.frame.midX - point.x, rhs.frame.midY - point.y)
+        }
+    }
+
+    private func isOuterEdge(_ side: SnapSide, of screen: NSScreen) -> Bool {
+        guard side == .left || side == .right else { return false }
+        let frame = screen.frame
+        let edge = side == .left ? frame.minX : frame.maxX
+        return !NSScreen.screens.contains { other in
+            guard other !== screen else { return false }
+            let overlap = min(other.frame.maxY, frame.maxY) - max(other.frame.minY, frame.minY)
+            guard overlap > 40 else { return false }
+            let neighbor = side == .left ? other.frame.maxX : other.frame.minX
+            return abs(neighbor - edge) < 4
+        }
+    }
+
+    private func isTopEdge(of screen: NSScreen) -> Bool {
+        let frame = screen.frame
+        return !NSScreen.screens.contains { other in
+            guard other !== screen else { return false }
+            let overlap = min(other.frame.maxX, frame.maxX) - max(other.frame.minX, frame.minX)
+            guard overlap > 40 else { return false }
+            return abs(other.frame.minY - frame.maxY) < 4
+        }
+    }
+
+    private func framesMatch(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
+        abs(lhs.minX - rhs.minX) < 1
+            && abs(lhs.minY - rhs.minY) < 1
+            && abs(lhs.width - rhs.width) < 1
+            && abs(lhs.height - rhs.height) < 1
+    }
+
+    private func screen(matching frame: NSRect?) -> NSScreen? {
+        guard let frame else { return nil }
+        return NSScreen.screens.first { framesMatch($0.frame, frame) }
+    }
+
+    private func tileMargins() -> CGFloat {
+        let value = CFPreferencesCopyAppValue("EnableTiledWindowMargins" as CFString, "com.apple.WindowManager" as CFString)
+        let enabled = (value as? NSNumber)?.boolValue ?? true
+        return enabled ? 8 : 0
+    }
+
+    private func previewTarget(at mouse: NSPoint) -> (SnapSide, NSScreen)? {
+        guard let screen = screen(at: mouse) else { return nil }
+        let frame = screen.frame
+        if isOuterEdge(.left, of: screen), mouse.x - frame.minX <= pointerSnapMargin {
+            return (.left, screen)
+        }
+        if isOuterEdge(.right, of: screen), frame.maxX - mouse.x <= pointerSnapMargin {
+            return (.right, screen)
+        }
+        if isTopEdge(of: screen), mouse.y >= screen.visibleFrame.maxY - 2 {
+            return (.full, screen)
+        }
+        return nil
+    }
+
+    private func pointerStillInPreview(_ mouse: NSPoint) -> Bool {
+        guard let previewSide, let screen = screen(matching: previewScreenFrame) else { return false }
+        let frame = screen.frame
+        switch previewSide {
+        case .left: return mouse.x - frame.minX <= pointerHoldMargin
+        case .right: return frame.maxX - mouse.x <= pointerHoldMargin
+        case .full:
+            let overScreen = mouse.x >= frame.minX && mouse.x <= frame.maxX
+            return overScreen && mouse.y >= screen.visibleFrame.maxY - pointerHoldMargin
+        }
+    }
+
+    private func updatePreview(at mouse: NSPoint) {
+        if let (side, screen) = previewTarget(at: mouse) {
+            showPreview(side, on: screen)
+        } else if previewSide != nil, !pointerStillInPreview(mouse) {
+            hidePreview()
+        }
+    }
+
+    private func showPreview(_ side: SnapSide, on screen: NSScreen) {
+        guard let window else { return }
+        let panel = tileHighlight ?? TileHighlightPanel()
+        tileHighlight = panel
+        let frame = snappedFrame(side, on: screen)
+        let same = previewSide == side && previewScreenFrame.map { framesMatch($0, screen.frame) } == true
+        previewSide = side
+        previewScreenFrame = screen.frame
+        if !same || !framesMatch(panel.frame, frame) {
+            panel.setFrame(frame, display: true)
+            panel.contentView?.needsDisplay = true
+        }
+        guard !panel.isVisible else {
+            panel.order(.below, relativeTo: window.windowNumber)
+            return
+        }
+        panel.alphaValue = 0
+        panel.order(.below, relativeTo: window.windowNumber)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            panel.animator().alphaValue = 1
+        }
+    }
+
+    private func hidePreview() {
+        previewSide = nil
+        previewScreenFrame = nil
+        tileHighlight?.orderOut(nil)
+    }
+
+    private func snappedFrame(_ side: SnapSide, on screen: NSScreen) -> NSRect {
+        let visible = screen.visibleFrame
+        let scale = max(screen.backingScaleFactor, 1)
+        func pixel(_ value: CGFloat) -> CGFloat { (value * scale).rounded() / scale }
+        let margin = tileMargins()
+        let minX = pixel(visible.minX + margin)
+        let minY = pixel(visible.minY + margin)
+        let maxX = pixel(visible.maxX - margin)
+        let maxY = pixel(visible.maxY - margin)
+        let height = maxY - minY
+        switch side {
+        case .full:
+            return NSRect(x: minX, y: minY, width: maxX - minX, height: height)
+        case .left, .right:
+            if margin == 0 {
+                let mid = pixel(minX + (maxX - minX) / 2)
+                if side == .left {
+                    return NSRect(x: minX, y: minY, width: mid - minX, height: height)
+                }
+                return NSRect(x: mid, y: minY, width: maxX - mid, height: height)
+            }
+            let width = pixel((maxX - minX - margin) / 2)
+            if side == .left {
+                return NSRect(x: minX, y: minY, width: width, height: height)
+            }
+            let x = pixel(maxX - width)
+            return NSRect(x: x, y: minY, width: maxX - x, height: height)
+        }
+    }
+
+    private func liftOutOfTile(at mouse: NSPoint) {
+        guard let window, snapSide != nil else { return }
+        let restored = preSnapFrame ?? dragStartFrame
+        let size = restored.size
+        window.minSize = NSSize(
+            width: min(normalMinSize.width, size.width),
+            height: min(normalMinSize.height, size.height)
+        )
+        let grabX = min(max(size.width * dragGrabFraction, 24), max(size.width - 24, 24))
+        let fromTop = min(max(dragGrabFromTop, 8), max(size.height - 8, 8))
+        let origin = NSPoint(x: mouse.x - grabX, y: mouse.y - (size.height - fromTop))
+        let frame = NSRect(origin: origin, size: size)
+        window.setFrame(frame, display: true)
+        if size.width >= normalMinSize.width, size.height >= normalMinSize.height {
+            window.minSize = normalMinSize
+        }
+        snapSide = nil
+        snappedScreenFrame = nil
+        dragStartMouse = mouse
+        dragStartOrigin = origin
+        dragStartFrame = frame
+    }
+
+    private func commitTile(_ side: SnapSide, on screen: NSScreen) {
+        guard let window else { return }
+        if preSnapFrame == nil {
+            preSnapFrame = dragStartFrame
+        }
+        snapSide = side
+        snappedScreenFrame = screen.frame
+        hidePreview()
+        let frame = snappedFrame(side, on: screen)
+        window.minSize = NSSize(
+            width: min(normalMinSize.width, frame.width),
+            height: min(normalMinSize.height, frame.height)
+        )
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.32
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            window.animator().setFrame(frame, display: true)
+        } completionHandler: { [weak window] in
+            guard let window, !self.framesMatch(window.frame, frame), self.snapSide == side else { return }
+            window.setFrame(frame, display: true)
         }
     }
 

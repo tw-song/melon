@@ -57,3 +57,23 @@ test('a saved report leaves out the full reference list', () => {
   assert.match(html, /California/)
   assert.match(html, /<h3>Schedule<\/h3>/)
 })
+
+test('a master report can keep entered inputs and drop sections', () => {
+  setProgramContext(null)
+  const mortgage = entry('mortgage', { price: '500000', loanType: 'va' })
+  const html = reportDocument([mortgage], 'Melon — Master file', {
+    enteredOnly: true,
+    schedule: false,
+    formula: false,
+  })
+  assert.match(html, /<h1>Master file<\/h1>/)
+  const inputs = html.split('<h3>Result</h3>')[0]
+  assert.match(inputs, /Home price/)
+  assert.match(inputs, /\$500,000\.00/)
+  assert.match(inputs, />VA</)
+  assert.equal(inputs.includes('Down payment'), false)
+  assert.equal(inputs.includes('Property tax'), false)
+  assert.equal(html.includes('<h3>Schedule</h3>'), false)
+  assert.equal(html.includes('<h3>Formula</h3>'), false)
+  assert.match(html, /Monthly housing/)
+})

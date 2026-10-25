@@ -1,5 +1,5 @@
 import { renderChart } from './chart.js'
-import { MAX_SALE_ITEMS, calculators, defaultInputs, getCalculator, getExchangeState, housingLink, isCalcId, parseLines, parseSaleItems, setExchangeRates, setProgramContext, subscriptionLink, visibleFields } from './calculators.js'
+import { MAX_SALE_ITEMS, blankInputs, calculators, defaultInputs, getCalculator, getExchangeState, housingLink, isCalcId, parseLines, parseSaleItems, setExchangeRates, setProgramContext, subscriptionLink, visibleFields } from './calculators.js'
 import { timeAgo } from './format.js'
 import { escapeHtml } from './html.js'
 import { icon } from './icons.js'
@@ -25,6 +25,10 @@ const state = {
   paletteIndex: 0,
   paletteCommands: [],
   examplesOpen: false,
+  masterOpen: false,
+  masterIds: [],
+  masterEnteredOnly: false,
+  masterParts: { inputs: true, result: true, schedule: true, formula: true },
   copyLabel: 'Copy',
   saveLabel: 'Save',
   editedAt: {},
@@ -81,6 +85,7 @@ function load() {
         if (calc.id === 'dti' && typeof saved.other === 'string' && typeof saved.others !== 'string') {
           next.others = JSON.stringify([{ comment: '', amount: saved.other }])
         }
+        if (calc.id === 'percent' && typeof saved.paid !== 'string' && saved.period === 'monthly') next.paid = 'monthly'
         state.inputs[calc.id] = next
       }
     }
@@ -157,7 +162,7 @@ function renderActivity() {
 }
 
 function renderCalcList() {
-  return ['Growth', 'Borrowing', 'Spending', 'Pay', 'Planning', 'Net worth', 'Currency', 'Scientific', 'Tools'].map((group) => {
+  return ['Growth', 'Borrowing', 'Credit', 'Spending', 'Pay', 'Planning', 'Net worth', 'Currency', 'Scientific', 'Tools'].map((group) => {
     const items = calculators.filter((calc) => calc.group === group).map((calc) => `
       <button type="button" class="nav-item" id="calc-${calc.id}" data-action="select-calc" data-id="${calc.id}" ${calc.id === state.activeId ? 'aria-current="true"' : ''}>
         ${icon(calc.icon, 15)}
@@ -172,7 +177,7 @@ function renderHistoryShell() {
   return `
     <div class="group-label history-label">
       <span>Saved <span class="count">${state.snapshots.length}</span></span>
-      ${categorySnapshots().length ? `<span class="history-actions"><button type="button" class="history-pdf" data-action="download-saved" title="Download saved ${escapeHtml(getCalculator(state.activeId).group)} PDF">PDF</button><button type="button" class="history-pdf" data-action="download-saved-excel" title="Download saved ${escapeHtml(getCalculator(state.activeId).group)} Excel">Excel</button></span>` : ''}
+      ${state.snapshots.length ? `<span class="history-actions"><button type="button" class="history-pdf" data-action="open-master" title="Choose what goes in one PDF or Excel file">File</button></span>` : ''}
     </div>
     ${state.snapshots.length ? `<input id="history-filter" class="sidebar-search" placeholder="Filter saved" aria-label="Filter saved calculations" value="${escapeHtml(state.historyQuery)}" />` : ''}
     <div id="history-list"></div>
@@ -188,7 +193,7 @@ function renderHistoryList() {
     return snap.title.toLowerCase().includes(query) || snap.summary.toLowerCase().includes(query)
   })
   if (state.snapshots.length === 0) {
-    list.innerHTML = `<div class="empty"><p>No saved calculations</p><p class="empty-hint">Save a result, then download it as a PDF or an Excel file.</p></div>`
+    list.innerHTML = `<div class="empty"><p>No saved calculations</p><p class="empty-hint">Save a result, then choose what goes in one PDF or Excel file.</p></div>`
     return
   }
   if (items.length === 0) {
@@ -249,7 +254,7 @@ function renderField(field, values, errors) {
           ${field.parts.map((part) => `
             <label>
               <span class="field-label">${escapeHtml(part.label)}</span>
-              <span class="control${errors[part.key] ? ' invalid' : ''}" data-field="${part.key}">
+              <span class="control${errors[part.key] || (field.required && error) ? ' invalid' : ''}" data-field="${part.key}">
                 <input name="${part.key}" class="no-prefix" inputmode="decimal" spellcheck="false" aria-label="${escapeHtml(`${field.label} ${part.label}`)}" value="${escapeHtml(values[part.key] ?? '')}" />
               </span>
             </label>
@@ -385,7 +390,7 @@ function renderField(field, values, errors) {
           ${rows.map((row, index) => wide.length ? `
             <div class="item-card">
               ${wide.map((column) => lineField(column, row, index)).join('')}
-              <div class="line-amounts card-figures">
+              <div class="line-amounts card-figures${compact.length <= 2 ? ' card-figures-short' : ''}">
                 ${compact.map((column) => lineField(column, row, index)).join('')}
                 ${removeButton(index)}
               </div>
@@ -443,6 +448,22 @@ function renderField(field, values, errors) {
       </div>
     `
   }
+  if (field.kind === 'slider') {
+    const min = field.min ?? 0
+    const max = field.max ?? 100
+    const step = field.step ?? 1
+    const current = value === '' ? String(min) : value
+    return `
+      <div class="field">
+        <div class="range-row">
+          <span class="field-label">${escapeHtml(field.label)}</span>
+          <span class="range-readout" data-slider-value="${field.key}">${escapeHtml(current)}${escapeHtml(field.suffix || '')}</span>
+        </div>
+        <input class="range" type="range" name="${field.key}" min="${min}" max="${max}" step="${step}" value="${escapeHtml(current)}" aria-label="${escapeHtml(field.label)}" aria-valuetext="${escapeHtml(current)}${escapeHtml(field.suffix || '')}" />
+        ${fieldMessage(field, error, values)}
+      </div>
+    `
+  }
   if (field.kind === 'select') {
     return `
       <label class="field">
@@ -489,6 +510,7 @@ function renderEditorHeader() {
       <button type="button" class="btn" data-action="toggle-examples" aria-expanded="${state.examplesOpen}">Examples</button>
       ${menu}
       <button type="button" class="btn" data-action="reset">Reset</button>
+      <button type="button" class="btn" data-action="reset-all">Reset all</button>
       <button type="button" class="btn" data-action="save" ${outcome.ok ? '' : 'disabled'}>${escapeHtml(state.saveLabel)}</button>
     </div>
   `
@@ -537,7 +559,8 @@ function syncErrors(outcome) {
       for (const part of field.parts) {
         handled.add(part.key)
         if (errors[part.key]) partError = partError || errors[part.key]
-        editor.querySelector(`[data-field="${part.key}"]`)?.classList.toggle('invalid', Boolean(errors[part.key]))
+        const partInvalid = Boolean(errors[part.key] || (field.required && errors[field.key]))
+        editor.querySelector(`[data-field="${part.key}"]`)?.classList.toggle('invalid', partInvalid)
       }
       applyFieldMessage(null, editor.querySelector(`[data-msg="${field.key}"]`), partError || errors[field.key] || '', hintText(field, values))
       continue
@@ -727,7 +750,19 @@ function saveSnapshot() {
 function resetActive() {
   const calc = getCalculator(state.activeId)
   state.examplesOpen = false
-  state.inputs[calc.id] = { ...calc.defaults }
+  state.comboKey = ''
+  state.inputs[calc.id] = blankInputs()[calc.id]
+  delete state.editedAt[calc.id]
+  renderEditor()
+  updateOutput()
+  persist()
+}
+
+function resetAll() {
+  state.examplesOpen = false
+  state.comboKey = ''
+  state.inputs = blankInputs()
+  state.editedAt = {}
   renderEditor()
   updateOutput()
   persist()
@@ -821,7 +856,7 @@ function downloadBytes(bytes, filename) {
   URL.revokeObjectURL(url)
 }
 
-function downloadSnapshots(snaps, format = 'pdf') {
+function downloadSnapshots(snaps, format = 'pdf', options) {
   if (!snaps.length) return
   const entries = snaps.map((snap) => ({
     calc: getCalculator(snap.calcId),
@@ -829,13 +864,118 @@ function downloadSnapshots(snaps, format = 'pdf') {
     savedAt: snap.savedAt,
     outcome: snapshotOutcome(snap),
   }))
+  const master = snaps.length > 1
   if (format === 'excel') {
-    const title = snaps.length === 1 ? `Melon - ${snaps[0].title}` : 'Melon - Saved calculations'
-    downloadBytes(workbookFile(sheetsForEntries(entries)), `${title.replace(/[\\/:*?"<>|]/g, '')}.xlsx`)
+    const title = master ? 'Melon - Master file' : `Melon - ${snaps[0].title}`
+    downloadBytes(workbookFile(sheetsForEntries(entries, options)), `${title.replace(/[\\/:*?"<>|]/g, '')}.xlsx`)
     return
   }
-  const title = snaps.length === 1 ? `Melon — ${snaps[0].title}` : 'Melon — Saved calculations'
-  printReport(reportDocument(entries, title), title)
+  const title = master ? 'Melon — Master file' : `Melon — ${snaps[0].title}`
+  printReport(reportDocument(entries, title, options), title)
+}
+
+function masterSelection() {
+  const ids = new Set(state.masterIds)
+  return state.snapshots.filter((snap) => ids.has(snap.id))
+}
+
+function masterReady() {
+  return masterSelection().length > 0 && Object.values(state.masterParts).some(Boolean)
+}
+
+function renderMaster() {
+  const root = document.getElementById('master')
+  const body = document.getElementById('master-body')
+  if (!root || !body) return
+  root.hidden = !state.masterOpen
+  if (!state.masterOpen) return
+  const scroll = body.querySelector('.master-list')?.scrollTop || 0
+  const selected = new Set(state.masterIds)
+  const parts = state.masterParts
+  const chip = (key, label) => `
+    <button type="button" class="master-chip" data-action="toggle-master-part" data-part="${key}" aria-pressed="${parts[key]}">${label}</button>
+  `
+  const groupOrder = []
+  for (const calc of calculators) {
+    if (!groupOrder.includes(calc.group)) groupOrder.push(calc.group)
+  }
+  const grouped = groupOrder.map((name) => ({
+    name,
+    items: state.snapshots.filter((snap) => getCalculator(snap.calcId).group === name),
+  })).filter((group) => group.items.length)
+  const rows = grouped.map((group) => `
+    <div class="master-group">${escapeHtml(group.name)}</div>
+    ${group.items.map((snap) => `
+      <button type="button" class="master-row" data-action="toggle-master-id" data-id="${snap.id}" aria-pressed="${selected.has(snap.id)}">
+        <span class="master-check" aria-hidden="true"></span>
+        <span class="master-row-text">
+          <span class="master-row-title">${escapeHtml(snap.title)}</span>
+          <span class="master-row-summary">${escapeHtml(snap.summary)}</span>
+        </span>
+      </button>
+    `).join('')}
+  `).join('')
+  body.innerHTML = `
+    <div class="master-head">
+      <h2 id="master-title">Master file</h2>
+      <p>Choose the saved calculations in the file, and what each one includes.</p>
+    </div>
+    <div class="master-section">
+      <button type="button" class="master-option" data-action="toggle-master-entered" aria-pressed="${state.masterEnteredOnly}">
+        <span class="master-check" aria-hidden="true"></span>
+        <span class="master-copy">
+          <strong>Only entered inputs</strong>
+          <span>Each tab leaves out fields that are still at their starting value.</span>
+        </span>
+      </button>
+    </div>
+    <div class="master-section">
+      <p class="master-label">Include</p>
+      <div class="master-chips">
+        ${chip('inputs', 'Inputs')}
+        ${chip('result', 'Result')}
+        ${chip('schedule', 'Schedule')}
+        ${chip('formula', 'Formula')}
+      </div>
+    </div>
+    <div class="master-section">
+      <div class="master-tools">
+        <button type="button" class="history-pdf" data-action="master-all">All</button>
+        <button type="button" class="history-pdf" data-action="master-none">None</button>
+      </div>
+    </div>
+    <div class="master-list">${rows || '<div class="empty"><p>No saved calculations</p></div>'}</div>
+    <div class="master-foot">
+      <button type="button" class="btn" data-action="close-master">Cancel</button>
+      <button type="button" class="btn" data-action="master-excel" ${masterReady() ? '' : 'disabled'}>Excel</button>
+      <button type="button" class="btn btn-strong" data-action="master-pdf" ${masterReady() ? '' : 'disabled'}>PDF</button>
+    </div>
+  `
+  const list = body.querySelector('.master-list')
+  if (list) list.scrollTop = scroll
+}
+
+function openMaster() {
+  const preferred = categorySnapshots()
+  const source = preferred.length ? preferred : state.snapshots
+  state.masterIds = source.map((snap) => snap.id)
+  state.masterOpen = true
+  renderMaster()
+}
+
+function closeMaster() {
+  state.masterOpen = false
+  const root = document.getElementById('master')
+  if (root) root.hidden = true
+}
+
+function downloadMaster(format) {
+  if (!masterReady()) return
+  downloadSnapshots(masterSelection(), format, {
+    ...state.masterParts,
+    enteredOnly: state.masterEnteredOnly,
+  })
+  closeMaster()
 }
 
 function deleteSnapshot(id) {
@@ -871,7 +1011,9 @@ function buildCommands() {
       },
     }))),
     { group: 'Actions', title: 'Save snapshot', run: () => saveSnapshot() },
+    { group: 'Actions', title: 'Master file', subtitle: 'Choose a PDF or Excel download', run: () => { setActivity('history'); openMaster() } },
     { group: 'Actions', title: 'Reset inputs', run: () => resetActive() },
+    { group: 'Actions', title: 'Reset all inputs', subtitle: 'Every calculator', run: () => resetAll() },
     {
       group: 'Actions',
       title: state.sidebarOpen ? 'Hide sidebar' : 'Show sidebar',
@@ -1090,6 +1232,7 @@ function blankMeansZero(el) {
     const field = calc.fields.find((item) => item.key === el.dataset.lineField)
     const column = field?.columns?.find((item) => item.key === el.dataset.lineKey)
     if (!column || column.type !== 'number' || column.required) return false
+    if (el.dataset.lineField === 'services' && el.dataset.lineKey === 'price') return false
     const rows = parseLines(state.inputs[state.activeId][field.key], field.blank || {})
     const row = rows[Number(el.dataset.lineIndex)]
     if (!row) return false
@@ -1109,6 +1252,10 @@ function onFieldBlur(event) {
   const el = event.target
   if (!(el instanceof HTMLInputElement) || el.readOnly || el.dataset.comboSearch) return
   if (String(el.value).trim() !== '') return
+  if (state.activeId === 'subscriptions' && el.dataset.lineField === 'services' && el.dataset.lineKey === 'price') {
+    renderForm()
+    return
+  }
   if (!blankMeansZero(el)) return
   el.value = '0'
   el.dispatchEvent(new Event('input', { bubbles: true }))
@@ -1129,6 +1276,7 @@ function onFieldInput(event) {
     const index = Number(el.dataset.lineIndex)
     if (!rows[index]) return
     rows[index][el.dataset.lineKey] = el.value
+    if (state.activeId === 'subscriptions' && el.dataset.lineKey === 'service') rows[index].price = ''
     state.inputs[state.activeId][el.dataset.lineField] = JSON.stringify(rows)
     markEdited()
     if (state.activeId === 'subscriptions' && el.dataset.lineKey === 'service') renderForm()
@@ -1146,6 +1294,12 @@ function onFieldInput(event) {
   }
   if (!el.name || el.readOnly) return
   state.inputs[state.activeId][el.name] = el.value
+  if (el.type === 'range') {
+    const readout = document.querySelector(`[data-slider-value="${el.name}"]`)
+    const suffix = getCalculator(state.activeId).fields.find((field) => field.key === el.name)?.suffix || ''
+    if (readout) readout.textContent = `${el.value}${suffix}`
+    el.setAttribute('aria-valuetext', `${el.value}${suffix}`)
+  }
   markEdited()
   updateOutput()
   persist()
@@ -1220,14 +1374,36 @@ function onClick(event) {
     renderEditorHeader()
   } else if (action === 'load-example') loadExample(btn.dataset.index)
   else if (action === 'reset') resetActive()
+  else if (action === 'reset-all') resetAll()
   else if (action === 'save') saveSnapshot()
   else if (action === 'copy') copyResult()
   else if (action === 'restore') restoreSnapshot(btn.dataset.id)
   else if (action === 'delete-snapshot') deleteSnapshot(btn.dataset.id)
   else if (action === 'download-snapshot') downloadSnapshots(state.snapshots.filter((snap) => snap.id === btn.dataset.id))
   else if (action === 'download-snapshot-excel') downloadSnapshots(state.snapshots.filter((snap) => snap.id === btn.dataset.id), 'excel')
-  else if (action === 'download-saved') downloadSnapshots(categorySnapshots())
-  else if (action === 'download-saved-excel') downloadSnapshots(categorySnapshots(), 'excel')
+  else if (action === 'open-master') openMaster()
+  else if (action === 'close-master') closeMaster()
+  else if (action === 'toggle-master-entered') {
+    state.masterEnteredOnly = !state.masterEnteredOnly
+    renderMaster()
+  } else if (action === 'toggle-master-part') {
+    const part = btn.dataset.part
+    if (part in state.masterParts) state.masterParts[part] = !state.masterParts[part]
+    renderMaster()
+  } else if (action === 'toggle-master-id') {
+    const id = btn.dataset.id
+    state.masterIds = state.masterIds.includes(id)
+      ? state.masterIds.filter((item) => item !== id)
+      : [...state.masterIds, id]
+    renderMaster()
+  } else if (action === 'master-all') {
+    state.masterIds = state.snapshots.map((snap) => snap.id)
+    renderMaster()
+  } else if (action === 'master-none') {
+    state.masterIds = []
+    renderMaster()
+  } else if (action === 'master-pdf') downloadMaster('pdf')
+  else if (action === 'master-excel') downloadMaster('excel')
   else if (action === 'panel-tab') {
     state.panelTab = btn.dataset.tab
     renderPanel(computeCurrent())
@@ -1295,6 +1471,10 @@ function onKeyDown(event) {
   const meta = event.metaKey || event.ctrlKey
   if (event.key === 'Escape') {
     setBrandMenu(false)
+    if (state.masterOpen) {
+      closeMaster()
+      return
+    }
     if (state.paletteOpen) closePalette()
     if (state.comboKey) {
       state.comboKey = ''
