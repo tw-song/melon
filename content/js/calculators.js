@@ -140,16 +140,35 @@ export function parseLines(raw, fallback) {
   })
 }
 
-const passiveKinds = [
-  { value: 'rent', label: 'Rental income' },
-  { value: 'dividends', label: 'Dividends' },
-  { value: 'interest', label: 'Interest' },
-  { value: 'royalties', label: 'Royalties' },
-  { value: 'pension', label: 'Pension' },
-  { value: 'other', label: 'Other' },
-]
+const passiveKindLabels = {
+  rent: 'Rental income',
+  dividends: 'Dividends',
+  interest: 'Interest',
+  royalties: 'Royalties',
+  pension: 'Pension',
+  other: 'Other',
+}
 
-const passiveBlank = { kind: 'rent', amount: '800' }
+const passiveBlank = { source: '', amount: '', comment: '' }
+
+export function normalizePassiveSources(raw) {
+  let rows
+  try {
+    rows = JSON.parse(raw)
+  } catch {
+    return raw
+  }
+  if (!Array.isArray(rows)) return raw
+  const next = rows.map((row) => {
+    const typed = typeof row?.source === 'string' ? row.source : ''
+    return {
+      source: typed.trim() ? typed : (passiveKindLabels[row?.kind] || ''),
+      amount: typeof row?.amount === 'string' ? row.amount : row?.amount == null ? '' : String(row.amount),
+      comment: typeof row?.comment === 'string' ? row.comment : '',
+    }
+  })
+  return JSON.stringify(next.length ? next : [{ ...passiveBlank }])
+}
 
 const otherBlank = { comment: '', amount: '' }
 
@@ -191,14 +210,6 @@ function inputsDiffer(id) {
   })
 }
 
-function housingAmount(id) {
-  const saved = programInputs?.[id]
-  if (!saved) return null
-  const outcome = id === 'rent' ? computeRent(saved) : computeMortgage(saved)
-  if (!outcome.ok) return null
-  return outcome.result.raw.monthlyHousing
-}
-
 export function subscriptionLink() {
   if (!inputsDiffer('subscriptions')) return null
   const saved = programInputs?.subscriptions
@@ -206,6 +217,125 @@ export function subscriptionLink() {
   const outcome = computeSubscriptions(saved)
   if (!outcome.ok) return null
   return { monthly: outcome.result.raw.monthly }
+}
+
+function pickOpened(ids) {
+  const rows = []
+  for (const id of ids) {
+    const item = openedCalculator(id)
+    if (item) rows.push({ id, item, at: programEditedAt?.[id] || 0 })
+  }
+  if (!rows.length) return null
+  rows.sort((a, b) => b.at - a.at)
+  return rows[0]
+}
+
+function cardMonthly(opened) {
+  if (opened.saved.method === 'minimums') {
+    return parseLines(opened.saved.cards, cardBlank).reduce((sum, row) => {
+      const amount = parseLooseNumber(row.minimum)
+      return sum + (amount > 0 ? amount : 0)
+    }, 0)
+  }
+  const amount = parseLooseNumber(opened.saved.payment)
+  return amount > 0 ? amount : 0
+}
+
+function dtiCarrySource(key) {
+  if (key === 'wages') {
+    const picked = pickOpened(['wage', 'payrate'])
+    if (!picked) return null
+    const amount = picked.id === 'wage' ? picked.item.outcome.result.raw.annual / 12 : picked.item.outcome.result.raw.monthly
+    return amount > 0 ? { amount, from: picked.id === 'wage' ? 'Wage' : 'Pay rate' } : null
+  }
+  if (key === 'housing') {
+    const picked = pickOpened(['mortgage', 'rent'])
+    if (!picked) return null
+    const amount = picked.item.outcome.result.raw.monthlyHousing
+    return amount > 0 ? { amount, from: picked.id === 'mortgage' ? 'Mortgage' : 'Rent' } : null
+  }
+  if (key === 'auto') {
+    const picked = pickOpened(['carloan', 'carlease'])
+    if (!picked) return null
+    const amount = picked.item.outcome.result.raw.monthly
+    return amount > 0 ? { amount, from: picked.id === 'carloan' ? 'Car loan' : 'Car lease' } : null
+  }
+  if (key === 'cards') {
+    const picked = pickOpened(['creditcard'])
+    if (!picked) return null
+    const amount = cardMonthly(picked.item)
+    return amount > 0 ? { amount, from: 'Credit card' } : null
+  }
+  if (key === 'subscriptions') {
+    const link = subscriptionLink()
+    if (!link || !(link.monthly > 0)) return null
+    return { amount: link.monthly, from: 'Subscriptions' }
+  }
+  return null
+}
+
+function carriedAmount(amount) {
+  return String(Math.round(amount * 100) / 100)
+}
+
+export function noteDtiEdit(values, key, raw) {
+  const source = dtiCarrySource(key)
+  const typed = parseLooseNumber(raw)
+  if (source && typed !== null && Math.abs(typed - source.amount) < 0.005) {
+    values[`${key}Custom`] = ''
+    return
+  }
+  const fallback = getCalculator('dti').defaults[key]
+  values[`${key}Custom`] = !source && String(raw) === String(fallback ?? '') ? '' : '1'
+}
+
+function dtiCarryState(values, key) {
+  const source = dtiCarrySource(key)
+  if (!source) return { source: null, carried: false, reminded: false }
+  if (values[`${key}Custom`] === '1') return { source, carried: false, reminded: true }
+  const stored = values[key]
+  const fallback = getCalculator('dti').defaults[key]
+  const typed = parseLooseNumber(stored)
+  const blank = stored === undefined || stored === null || String(stored).trim() === ''
+  const matchesSource = typed !== null && Math.abs(typed - source.amount) < 0.005
+  const matchesDefault = String(stored ?? '') === String(fallback ?? '')
+  if (blank || matchesDefault || matchesSource) return { source, carried: true, reminded: false }
+  return { source, carried: false, reminded: true }
+}
+
+function carriedField(key, label, hint) {
+  return {
+    key,
+    label,
+    kind: 'number',
+    prefix: '$',
+    min: 0,
+    ...amountMax,
+    displayValue: (values) => {
+      const state = dtiCarryState(values, key)
+      if (!state.carried) return null
+      return carriedAmount(state.source.amount)
+    },
+    hint: (values) => {
+      const state = dtiCarryState(values, key)
+      if (!state.source) return hint
+      if (state.reminded) return `This was filled from ${state.source.from}. Your amount is used here instead.`
+      return `Filled from ${state.source.from}.`
+    },
+  }
+}
+
+function applyCarry(values, key, numbers) {
+  const state = dtiCarryState(values, key)
+  if (state.carried) numbers[key] = state.source.amount
+  if (!state.source) return { from: '', carried: false, reminded: false, linked: 0 }
+  return { from: state.source.from, carried: state.carried, reminded: state.reminded, linked: state.source.amount }
+}
+
+function carryLine(label, amount, carry) {
+  if (carry.carried) return `${label} = ${money(amount)} from ${carry.from}`
+  if (carry.reminded) return `${label} = ${money(amount)}. ${carry.from} has ${money(carry.linked)}. This amount is used here instead.`
+  return `${label} = ${money(amount)}`
 }
 
 function subscriptionStat() {
@@ -229,21 +359,6 @@ function wageSubscriptionStats(annualTakeHome) {
     value: money(left),
     tone: left >= 0 ? 'positive' : 'negative',
   }]
-}
-
-export function housingLink(source) {
-  const mortgageOn = inputsDiffer('mortgage')
-  const rentOn = inputsDiffer('rent')
-  let from = null
-  if (source === 'mortgage') from = 'mortgage'
-  else if (source === 'rent') from = 'rent'
-  else if (mortgageOn && rentOn) from = (programEditedAt.rent || 0) > (programEditedAt.mortgage || 0) ? 'rent' : 'mortgage'
-  else if (mortgageOn) from = 'mortgage'
-  else if (rentOn) from = 'rent'
-  if (!from) return null
-  const amount = housingAmount(from)
-  if (amount == null) return null
-  return { from, amount }
 }
 
 const sampleCards = [
@@ -915,12 +1030,10 @@ export const calculators = [
       wages: '6500',
       passiveMode: 'none',
       passive: JSON.stringify([passiveBlank]),
-      housingSource: 'auto',
       housing: '1800',
       auto: '350',
       cards: '120',
       student: '200',
-      subscriptionSource: 'auto',
       subscriptions: '0',
       others: JSON.stringify(defaultOthers),
     },
@@ -930,7 +1043,6 @@ export const calculators = [
         values: {
           wages: '6500',
           passiveMode: 'none',
-          housingSource: 'amount',
           housing: '1800',
           auto: '350',
           cards: '120',
@@ -943,8 +1055,7 @@ export const calculators = [
         values: {
           wages: '6500',
           passiveMode: 'add',
-          passive: JSON.stringify([{ kind: 'rent', amount: '1200' }]),
-          housingSource: 'amount',
+          passive: JSON.stringify([{ source: 'Rental income', amount: '1200', comment: 'Duplex' }]),
           housing: '1800',
           auto: '350',
           cards: '120',
@@ -954,7 +1065,7 @@ export const calculators = [
       },
     ],
     fields: [
-      { key: 'wages', label: 'Wages / month', kind: 'number', prefix: '$', min: 0, ...amountMax, hint: 'Gross pay before tax.' },
+      carriedField('wages', 'Wages / month', 'Gross pay before tax.'),
       {
         key: 'passiveMode',
         label: 'Passive income',
@@ -970,81 +1081,21 @@ export const calculators = [
         kind: 'lines',
         max: 8,
         addLabel: 'Add source',
-        blank: { kind: 'rent', amount: '' },
+        blank: passiveBlank,
         showIf: (values) => values.passiveMode === 'add',
         itemNoun: 'source',
-        hint: 'Monthly amounts. They are added to wages.',
+        hint: 'Type each source, the same way a debt gets a comment. Monthly amounts are added to wages.',
         columns: [
-          { key: 'kind', label: 'Source', type: 'select', options: passiveKinds },
+          { key: 'source', label: 'Source', type: 'text', placeholder: 'Optional', spellcheck: true, wide: true, focus: true },
+          { key: 'comment', label: 'Comment', type: 'text', placeholder: 'Optional', spellcheck: true },
           { key: 'amount', label: 'Monthly', type: 'number', prefix: '$' },
         ],
       },
-      {
-        key: 'housingSource',
-        label: 'Housing',
-        kind: 'segment',
-        options: [
-          { value: 'auto', label: 'Auto' },
-          { value: 'mortgage', label: 'Mortgage' },
-          { value: 'rent', label: 'Rent' },
-          { value: 'amount', label: 'Amount' },
-        ],
-        hint: 'Auto copies the monthly payment from Mortgage or Rent after you change that calculator.',
-      },
-      {
-        key: 'housing',
-        label: 'Housing / month',
-        kind: 'number',
-        prefix: '$',
-        min: 0,
-        ...amountMax,
-        readOnly: (values) => (values.housingSource || 'auto') !== 'amount' && Boolean(housingLink(values.housingSource || 'auto')),
-        displayValue: (values) => {
-          if ((values.housingSource || 'auto') === 'amount') return null
-          const link = housingLink(values.housingSource || 'auto')
-          return link ? String(Math.round(link.amount * 100) / 100) : null
-        },
-        hint: (values) => {
-          const source = values.housingSource || 'auto'
-          const link = source === 'amount' ? null : housingLink(source)
-          if (link?.from === 'mortgage') return 'Copied from your mortgage payment.'
-          if (link?.from === 'rent') return 'Copied from your rent payment.'
-          if (source === 'mortgage') return 'The mortgage calculator needs a valid loan before this can copy it.'
-          if (source === 'rent') return 'The rent calculator needs a valid lease before this can copy it.'
-          return 'Rent or mortgage, including taxes and insurance if you pay them.'
-        },
-      },
-      { key: 'auto', label: 'Auto / month', kind: 'number', prefix: '$', min: 0, ...amountMax },
-      { key: 'cards', label: 'Credit cards / month', kind: 'number', prefix: '$', min: 0, ...amountMax, hint: 'Minimum payments, not the full balance.' },
+      carriedField('housing', 'Housing / month', 'Rent or mortgage, including taxes and insurance if you pay them.'),
+      carriedField('auto', 'Auto / month', ''),
+      carriedField('cards', 'Credit cards / month', 'Minimum payments, not the full balance.'),
       { key: 'student', label: 'Student loans / month', kind: 'number', prefix: '$', min: 0, ...amountMax },
-      {
-        key: 'subscriptionSource',
-        label: 'Subscriptions',
-        kind: 'segment',
-        options: [
-          { value: 'auto', label: 'Auto' },
-          { value: 'amount', label: 'Amount' },
-        ],
-        hint: 'Auto copies the monthly total after you change Subscriptions.',
-      },
-      {
-        key: 'subscriptions',
-        label: 'Subscriptions / month',
-        kind: 'number',
-        prefix: '$',
-        min: 0,
-        ...amountMax,
-        readOnly: (values) => (values.subscriptionSource || 'auto') !== 'amount',
-        displayValue: (values) => {
-          if ((values.subscriptionSource || 'auto') === 'amount') return null
-          const link = subscriptionLink()
-          return link ? String(Math.round(link.monthly * 100) / 100) : '0'
-        },
-        hint: (values) => {
-          if ((values.subscriptionSource || 'auto') === 'amount') return 'Type a monthly total.'
-          return subscriptionLink() ? 'Copied from Subscriptions.' : 'Change Subscriptions and the monthly total shows up here.'
-        },
-      },
+      carriedField('subscriptions', 'Subscriptions / month', 'Monthly total for the services you pay.'),
       {
         key: 'others',
         label: 'Other debts / month',
@@ -4463,16 +4514,26 @@ function computeDti(values) {
   const { fieldErrors, numbers } = readFields(calc, values)
   const passive = []
   if (values.passiveMode === 'add') {
-    const labels = Object.fromEntries(passiveKinds.map((kind) => [kind.value, kind.label]))
-    parseLines(values.passive, { kind: 'rent', amount: '' }).forEach((row, index) => {
-      if (!labels[row.kind]) fieldErrors[`passive-${index}-kind`] = 'Choose a source'
+    let untitled = 0
+    parseLines(normalizePassiveSources(values.passive), passiveBlank).forEach((row, index) => {
+      const legacy = passiveKindLabels[row.kind] || ''
+      const source = String(row.source || '').trim() || legacy
+      const comment = String(row.comment || '').trim()
+      const amountText = String(row.amount || '').trim()
+      if (!source && !comment && !amountText) return
+      if (source.length > 80) fieldErrors[`passive-${index}-source`] = 'Keep the source under 80 characters'
+      if (comment.length > 80) fieldErrors[`passive-${index}-comment`] = 'Keep the comment under 80 characters'
       const parsed = readNumeric(row.amount, false)
       if (parsed.error) fieldErrors[`passive-${index}-amount`] = parsed.error
       else if (parsed.value < 0) fieldErrors[`passive-${index}-amount`] = 'Must be at least 0'
       else if (parsed.value > 1e12) fieldErrors[`passive-${index}-amount`] = 'Enter a smaller amount'
-      else if (parsed.value > 0 && !fieldErrors[`passive-${index}-kind`]) {
-        passive.push({ kind: row.kind, label: labels[row.kind], amount: parsed.value })
-      }
+      if (fieldErrors[`passive-${index}-source`] || fieldErrors[`passive-${index}-comment`] || fieldErrors[`passive-${index}-amount`]) return
+      if (!(parsed.value > 0)) return
+      if (!source && !comment) untitled += 1
+      const label = source && comment
+        ? `${source} · ${comment}`
+        : source || comment || (untitled === 1 ? 'Passive income' : `Passive income ${untitled}`)
+      passive.push({ label, amount: parsed.value })
     })
   }
   const passiveTotal = passive.reduce((sum, row) => sum + row.amount, 0)
@@ -4499,31 +4560,22 @@ function computeDti(values) {
   if (!fieldErrors.wages && numbers.wages !== undefined && numbers.wages + passiveTotal <= 0) {
     fieldErrors.wages = 'Enter income greater than zero'
   }
-  const source = values.housingSource === 'mortgage' || values.housingSource === 'rent' || values.housingSource === 'amount'
-    ? values.housingSource
-    : 'auto'
-  const link = source === 'amount' ? null : housingLink(source)
-  if (link) delete fieldErrors.housing
-  if ((source === 'mortgage' || source === 'rent') && !link) {
-    fieldErrors.housingSource = source === 'mortgage'
-      ? 'Enter a mortgage to use it here'
-      : 'Enter a rent amount to use it here'
-  }
-  const subSource = values.subscriptionSource === 'amount' ? 'amount' : 'auto'
-  if (subSource === 'auto') delete fieldErrors.subscriptions
   if (Object.keys(fieldErrors).length) return fail({ ...fieldErrors, ...otherErrors })
 
-  const housing = link ? link.amount : numbers.housing
-  const subLink = subSource === 'amount' ? null : subscriptionLink()
-  const subscriptionPay = subLink ? subLink.monthly : subSource === 'amount' ? numbers.subscriptions : 0
+  const wagesCarry = applyCarry(values, 'wages', numbers)
+  const housingCarry = applyCarry(values, 'housing', numbers)
+  const autoCarry = applyCarry(values, 'auto', numbers)
+  const cardsCarry = applyCarry(values, 'cards', numbers)
+  const subsCarry = applyCarry(values, 'subscriptions', numbers)
+  const housing = numbers.housing
+  const subscriptionPay = numbers.subscriptions
   const income = numbers.wages + passiveTotal
-  const housingLabel = link?.from === 'mortgage' ? 'Housing · Mortgage' : link?.from === 'rent' ? 'Housing · Rent' : 'Housing'
   const debtParts = [
-    [housingLabel, housing],
-    ['Auto', numbers.auto],
-    ['Credit cards', numbers.cards],
+    [housingCarry.carried ? `Housing · ${housingCarry.from}` : 'Housing', housing],
+    [autoCarry.carried ? `Auto · ${autoCarry.from}` : 'Auto', numbers.auto],
+    [cardsCarry.carried ? `Credit cards · ${cardsCarry.from}` : 'Credit cards', numbers.cards],
     ['Student loans', numbers.student],
-    ['Subscriptions', subscriptionPay],
+    [subsCarry.carried ? `Subscriptions · ${subsCarry.from}` : 'Subscriptions', subscriptionPay],
     ...others.map((row) => [row.label, row.amount]),
   ]
   const debts = debtParts.reduce((sum, [, amount]) => sum + amount, 0)
@@ -4541,8 +4593,6 @@ function computeDti(values) {
     { label: 'Suggested debt payment', value: money(income * 0.36) },
     { label: 'Suggested housing', value: money(income * 0.28) },
   )
-  if (link) stats.push({ label: 'Housing from', value: link.from === 'mortgage' ? 'Mortgage' : 'Rent' })
-  if (subLink) stats.push({ label: 'Subscriptions from', value: 'Subscriptions' })
 
   return {
     ok: true,
@@ -4572,11 +4622,14 @@ function computeDti(values) {
         'Monthly income = wages + passive income',
         'Housing ratio = housing payment / monthly income',
         '',
-        `Wages = ${money(numbers.wages)}`,
+        carryLine('Wages', numbers.wages, wagesCarry),
         `Passive income = ${money(passiveTotal)}`,
+        ...passive.map((row) => `${row.label} = ${money(row.amount)}`),
         `Monthly income = ${money(income)}`,
-        `Housing = ${money(housing)}${link ? ` from ${link.from}` : ''}`,
-        `Subscriptions = ${money(subscriptionPay)}${subLink ? ' from Subscriptions' : ''}`,
+        carryLine('Housing', housing, housingCarry),
+        carryLine('Auto', numbers.auto, autoCarry),
+        carryLine('Credit cards', numbers.cards, cardsCarry),
+        carryLine('Subscriptions', subscriptionPay, subsCarry),
         ...others.map((row) => `${row.label} = ${money(row.amount)}`),
         `Debt payments = ${money(debts)}`,
         `Debt-to-income = ${percentNumber(ratio * 100)}`,
@@ -4594,10 +4647,8 @@ function computeDti(values) {
         ratio,
         housingRatio,
         housing,
-        housingFrom: link?.from || '',
         passive: passiveTotal,
         subscriptions: subscriptionPay,
-        subscriptionsFrom: subLink ? 'subscriptions' : '',
         suggestedDebt: income * 0.36,
         suggestedHousing: income * 0.28,
       },

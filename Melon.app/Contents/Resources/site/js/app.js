@@ -1,5 +1,5 @@
 import { renderChart } from './chart.js'
-import { MAX_SALE_ITEMS, blankInputs, calculators, defaultInputs, getCalculator, getExchangeState, housingLink, isCalcId, parseLines, parseSaleItems, setExchangeRates, setProgramContext, subscriptionLink, visibleFields } from './calculators.js'
+import { MAX_SALE_ITEMS, blankInputs, calculators, defaultInputs, getCalculator, getExchangeState, isCalcId, normalizePassiveSources, noteDtiEdit, parseLines, parseSaleItems, setExchangeRates, setProgramContext, visibleFields } from './calculators.js'
 import { timeAgo } from './format.js'
 import { escapeHtml } from './html.js'
 import { icon } from './icons.js'
@@ -85,6 +85,7 @@ function load() {
         if (calc.id === 'dti' && typeof saved.other === 'string' && typeof saved.others !== 'string') {
           next.others = JSON.stringify([{ comment: '', amount: saved.other }])
         }
+        if (calc.id === 'dti' && typeof next.passive === 'string') next.passive = normalizePassiveSources(next.passive)
         if (calc.id === 'percent' && typeof saved.paid !== 'string' && saved.period === 'monthly') next.paid = 'monthly'
         state.inputs[calc.id] = next
       }
@@ -1294,6 +1295,9 @@ function onFieldInput(event) {
   }
   if (!el.name || el.readOnly) return
   state.inputs[state.activeId][el.name] = el.value
+  if (state.activeId === 'dti' && ['wages', 'housing', 'auto', 'cards', 'subscriptions'].includes(el.name)) {
+    noteDtiEdit(state.inputs.dti, el.name, el.value)
+  }
   if (el.type === 'range') {
     const readout = document.querySelector(`[data-slider-value="${el.name}"]`)
     const suffix = getCalculator(state.activeId).fields.find((field) => field.key === el.name)?.suffix || ''
@@ -1429,14 +1433,6 @@ function onClick(event) {
     pickCombo(btn.dataset.key, btn.dataset.value)
   } else if (action === 'set-option') {
     const values = state.inputs[state.activeId]
-    if (state.activeId === 'dti' && btn.dataset.key === 'housingSource' && btn.dataset.value === 'amount') {
-      const link = housingLink(values.housingSource || 'auto')
-      if (link) values.housing = String(Math.round(link.amount * 100) / 100)
-    }
-    if (state.activeId === 'dti' && btn.dataset.key === 'subscriptionSource' && btn.dataset.value === 'amount') {
-      const link = subscriptionLink()
-      if (link) values.subscriptions = String(Math.round(link.monthly * 100) / 100)
-    }
     values[btn.dataset.key] = btn.dataset.value
     markEdited()
     if (state.activeId === 'salestax' && btn.dataset.key === 'entry' && btn.dataset.value === 'list') seedSaleList(values)

@@ -722,8 +722,8 @@ test('debt-to-income adds passive income to wages', () => {
     wages: '5000',
     passiveMode: 'add',
     passive: JSON.stringify([
-      { kind: 'rent', amount: '1000' },
-      { kind: 'dividends', amount: '200' },
+      { source: 'Rental income', amount: '1000', comment: 'Duplex' },
+      { source: 'Dividends', amount: '200', comment: '' },
     ]),
     housing: '1800',
     auto: '400',
@@ -736,13 +736,36 @@ test('debt-to-income adds passive income to wages', () => {
   assert.ok(Math.abs(rental.result.raw.passive - 1200) < 0.01)
   assert.ok(Math.abs(rental.result.raw.ratio - 2550 / 6200) < 0.0001)
   assert.ok(rental.result.raw.ratio < wages.result.raw.ratio)
-  assert.equal(rental.result.schedule.rows[1].line, 'Rental income')
+  assert.equal(rental.result.schedule.rows[1].line, 'Rental income · Duplex')
   assert.equal(rental.result.schedule.rows[2].line, 'Dividends')
+  assert.match(rental.result.formula.join('\n'), /Rental income · Duplex/)
+
+  const legacy = run('dti', {
+    wages: '5000',
+    passiveMode: 'add',
+    passive: JSON.stringify([{ kind: 'interest', amount: '40', comment: '' }]),
+    housing: '0',
+    auto: '0',
+    cards: '0',
+    student: '0',
+  })
+  assert.equal(legacy.result.schedule.rows[1].line, 'Interest')
+
+  const longNote = run('dti', {
+    wages: '5000',
+    passiveMode: 'add',
+    passive: JSON.stringify([{ source: 'Rent', amount: '100', comment: 'x'.repeat(81) }]),
+    housing: '0',
+    auto: '0',
+    cards: '0',
+    student: '0',
+  })
+  assert.equal(longNote.ok, false)
+  assert.match(longNote.fieldErrors['passive-0-comment'], /80/)
 
   const noted = run('dti', {
     wages: '5000',
     passiveMode: 'none',
-    housingSource: 'amount',
     housing: '1800',
     auto: '0',
     cards: '0',
@@ -758,41 +781,24 @@ test('debt-to-income adds passive income to wages', () => {
   assert.equal(noted.fieldErrors['others-1-amount'], undefined)
 
   const mortgage = { ...getCalculator('mortgage').defaults, price: '500000', down: '100000' }
-  setProgramContext(
-    { mortgage, rent: { ...getCalculator('rent').defaults } },
-    { mortgage: 5, rent: 1 },
-  )
-  const linked = run('dti', {
-    wages: '8000',
-    passiveMode: 'none',
-    housingSource: 'auto',
-    housing: '1',
-    auto: '0',
-    cards: '0',
-    student: '0',
-    others: JSON.stringify([{ comment: '', amount: '0' }]),
-  })
+  setProgramContext({ mortgage }, { mortgage: 5 })
+  const copied = run('dti', { wages: '8000', housing: '1800', auto: '0', cards: '0', student: '0' })
   const mortgageResult = run('mortgage', mortgage)
-  assert.equal(linked.ok, true)
-  assert.equal(linked.result.raw.housingFrom, 'mortgage')
-  assert.ok(Math.abs(linked.result.raw.housing - mortgageResult.result.raw.monthlyHousing) < 0.02)
-  assert.ok(linked.result.raw.housing > 1)
+  assert.equal(copied.ok, true)
+  assert.ok(Math.abs(copied.result.raw.housing - mortgageResult.result.raw.monthlyHousing) < 0.02)
+  assert.match(copied.result.schedule.rows.map((row) => row.line).join('\n'), /Housing · Mortgage/)
 
-  const rentValues = { ...getCalculator('rent').defaults, rent: '3000' }
-  setProgramContext(
-    { mortgage, rent: rentValues },
-    { mortgage: 5, rent: 9 },
-  )
-  const fromRent = run('dti', {
+  const typed = run('dti', {
     wages: '8000',
-    housingSource: 'auto',
+    housing: '2000',
+    housingCustom: '1',
     auto: '0',
     cards: '0',
     student: '0',
   })
-  const rentResult = run('rent', rentValues)
-  assert.equal(fromRent.result.raw.housingFrom, 'rent')
-  assert.ok(Math.abs(fromRent.result.raw.housing - rentResult.result.raw.monthlyHousing) < 0.02)
+  assert.ok(Math.abs(typed.result.raw.housing - 2000) < 0.01)
+  assert.match(typed.result.formula.join('\n'), /Mortgage has/)
+  assert.match(typed.result.formula.join('\n'), /used here instead/)
   setProgramContext(null)
 })
 
@@ -827,7 +833,7 @@ test('exchange converts through USD and lists the other currencies', () => {
   assert.match(filtered.result.all.rows[0].currency, /JPY/)
 })
 
-test('subscriptions price the catalog and copy into debt, pay, and savings', () => {
+test('subscriptions price the catalog and copy into pay and savings', () => {
   const both = run('subscriptions')
   assert.equal(both.ok, true)
   assert.equal(both.result.raw.monthly, 29)
@@ -900,8 +906,9 @@ test('subscriptions price the catalog and copy into debt, pay, and savings', () 
   assert.equal(noted.result.schedule.rows[0].note, 'Weekend paper')
 
   setProgramContext(null)
-  const untouched = run('dti', { housingSource: 'amount', subscriptionSource: 'auto' })
-  assert.equal(untouched.result.raw.subscriptions, 0)
+  const untouched = run('dti', { subscriptions: '25', housing: '0', auto: '0', cards: '0', student: '0' })
+  assert.equal(untouched.result.raw.subscriptions, 25)
+  assert.ok(Math.abs(untouched.result.raw.debts - 25) < 0.001)
 
   setProgramContext({
     subscriptions: {
@@ -910,19 +917,31 @@ test('subscriptions price the catalog and copy into debt, pay, and savings', () 
       services: JSON.stringify([{ service: 'peacock', name: '', price: '' }]),
     },
   })
-  const linked = run('dti', {
+  const filled = run('dti', {
     wages: '4000',
-    housingSource: 'amount',
     housing: '0',
     auto: '0',
     cards: '0',
     student: '0',
-    subscriptionSource: 'auto',
+    subscriptions: '0',
     others: JSON.stringify([{ comment: '', amount: '0' }]),
   })
-  assert.equal(linked.result.raw.subscriptionsFrom, 'subscriptions')
-  assert.equal(linked.result.raw.subscriptions, 6.99)
-  assert.ok(Math.abs(linked.result.raw.debts - 6.99) < 0.001)
+  assert.equal(filled.result.raw.subscriptions, 6.99)
+  assert.ok(Math.abs(filled.result.raw.debts - 6.99) < 0.001)
+  assert.match(filled.result.formula.join('\n'), /from Subscriptions/)
+
+  const changed = run('dti', {
+    wages: '4000',
+    housing: '0',
+    auto: '0',
+    cards: '0',
+    student: '0',
+    subscriptions: '12',
+    subscriptionsCustom: '1',
+    others: JSON.stringify([{ comment: '', amount: '0' }]),
+  })
+  assert.equal(changed.result.raw.subscriptions, 12)
+  assert.match(changed.result.formula.join('\n'), /Your amount is used here instead|This amount is used here instead/)
 
   const wage = run('wage', { taxes: 'estimate', taxState: 'TX', filing: 'single' })
   assert.ok(Math.abs(wage.result.raw.afterSubscriptions - (wage.result.raw.takeHome / 12 - 6.99)) < 0.02)
@@ -1535,7 +1554,7 @@ test('an empty optional number is treated as zero', () => {
 
   const passive = run('dti', {
     passiveMode: 'add',
-    passive: JSON.stringify([{ kind: 'rent', amount: '' }]),
+    passive: JSON.stringify([{ source: '', amount: '' }]),
   })
   assert.equal(passive.ok, true)
   assert.equal(passive.result.raw.passive, 0)
